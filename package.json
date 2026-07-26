@@ -63,5 +63,10 @@
     "globals": "^16.5.0",
     "supertest": "^7.2.2",
     "vitest": "^4.1.10"
+  },
+  "overrides": {
+    "brace-expansion": "^5.0.8",
+    "find-my-way": "^9.7.0",
+    "valibot": "^1.4.2"
   }
 }
