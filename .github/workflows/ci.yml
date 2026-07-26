@@ -49,9 +49,10 @@ jobs:
       # Fail the build on a known HIGH/critical advisory in a production
       # dependency (dev-only and moderate advisories do not block). Dependabot
       # (see .github/dependabot.yml) opens the bump PRs; this gate stops a new
-      # one from shipping unnoticed.
+      # one from shipping unnoticed. The wrapper script carries a short,
+      # justified allowlist for advisories that provably cannot apply here.
       - name: Audit production dependencies
-        run: npm audit --omit=dev --audit-level=high
+        run: node scripts/audit-gate.mjs
       # Schema drift gate: a schema.prisma edit committed without a migration
       # fails here instead of surfacing at deploy time. prisma migrate diff
       # does not create its shadow database, so create it first.
