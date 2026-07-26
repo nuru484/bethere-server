@@ -43,6 +43,12 @@ export const frameUpload = multer({
   fileFilter,
   limits: {
     fileSize: 1.5 * 1024 * 1024, // 1.5MB per frame
-    files: LIVENESS.MAX_FRAMES,
+    // Busboy's global file cap. Sized to the LARGEST per-route allowance:
+    // batch routes pass .array("frames", MAX_FRAMES) and step routes
+    // .array("frames", MAX_STEP_FRAMES), and the per-route maxCount is what
+    // enforces the tighter bound. Using MAX_FRAMES alone here silently
+    // rejected legal 17-20 frame step bursts with UPLOAD_ERROR before the
+    // route-level count check ever ran.
+    files: Math.max(LIVENESS.MAX_FRAMES, LIVENESS.MAX_STEP_FRAMES),
   },
 });

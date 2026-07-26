@@ -178,4 +178,101 @@ describe("pairing (scan from phone)", () => {
     const res = await startPairing(user, { scope: "ATTENDANCE", mode: "in" });
     expect(res.status).toBe(400);
   });
+
+  it("runs a full check-in on the phone via the batch flow (one upload)", async () => {
+    const user = await enrolled("pair-batch-ci@test.local");
+    const { event } = await createEventWithActiveSession();
+    const venueCode = venueCodeFor(event.venueSecret);
+
+    const start = await startPairing(user, {
+      scope: "ATTENDANCE",
+      eventId: event.id,
+      mode: "in",
+    });
+    const { pairingId, handoffToken } = start.body.data;
+
+    // Phone mints a batch challenge (all actions up-front, prompted locally).
+    const ch = await request(app)
+      .post("/api/v1/pairing/session/challenge")
+      .set(bearer(handoffToken))
+      .send({ venueCode });
+    expect(ch.status).toBe(200);
+    expect(Array.isArray(ch.body.data.actions)).toBe(true);
+    expect(ch.body.data.actions.length).toBeGreaterThan(0);
+    expect(typeof ch.body.data.challengeToken).toBe("string");
+
+    // One burst proving everything.
+    const submit = request(app)
+      .post("/api/v1/pairing/session/capture")
+      .set(bearer(handoffToken))
+      .field("challengeToken", ch.body.data.challengeToken)
+      .field("venueCode", venueCode);
+    for (let f = 0; f < 8; f++) submit.attach("frames", FRAME, `f-${f}.jpg`);
+    const done = await submit;
+    expect(done.status).toBe(200);
+    expect(done.body.data.done).toBe(true);
+    expect(done.body.data.attendance.status).toMatch(/PRESENT|LATE/);
+
+    const poll = await request(app)
+      .get(`/api/v1/pairing/${pairingId}`)
+      .set("Cookie", [attendantCookie(user)]);
+    expect(poll.body.data.status).toBe("COMPLETED");
+  });
+
+  it("runs a full enrollment on the phone via the batch flow", async () => {
+    const user = await createAttendant({ email: "pair-batch-enroll@test.local" });
+
+    const start = await startPairing(user, { scope: "ENROLL" });
+    const { handoffToken } = start.body.data;
+
+    const ch = await request(app)
+      .post("/api/v1/pairing/session/challenge")
+      .set(bearer(handoffToken))
+      .send({});
+    expect(ch.status).toBe(200);
+
+    const submit = request(app)
+      .post("/api/v1/pairing/session/capture")
+      .set(bearer(handoffToken))
+      .field("challengeToken", ch.body.data.challengeToken)
+      .field("consent", "true");
+    for (let f = 0; f < 8; f++) submit.attach("frames", FRAME, `f-${f}.jpg`);
+    const done = await submit;
+    expect(done.status).toBe(200);
+    expect(done.body.data.done).toBe(true);
+    expect(done.body.data.user.hasFaceScan).toBe(true);
+  });
+
+  it("rejects a batch capture with too few frames without consuming the pairing", async () => {
+    const user = await enrolled("pair-batch-frames@test.local");
+    const { event } = await createEventWithActiveSession();
+    const venueCode = venueCodeFor(event.venueSecret);
+
+    const start = await startPairing(user, {
+      scope: "ATTENDANCE",
+      eventId: event.id,
+      mode: "in",
+    });
+    const { pairingId, handoffToken } = start.body.data;
+
+    const ch = await request(app)
+      .post("/api/v1/pairing/session/challenge")
+      .set(bearer(handoffToken))
+      .send({ venueCode });
+
+    const submit = request(app)
+      .post("/api/v1/pairing/session/capture")
+      .set(bearer(handoffToken))
+      .field("challengeToken", ch.body.data.challengeToken)
+      .field("venueCode", venueCode);
+    for (let f = 0; f < 3; f++) submit.attach("frames", FRAME, `f-${f}.jpg`);
+    const res = await submit;
+    expect(res.status).toBe(400);
+
+    // The pairing is still PENDING - the phone can retry.
+    const poll = await request(app)
+      .get(`/api/v1/pairing/${pairingId}`)
+      .set("Cookie", [attendantCookie(user)]);
+    expect(poll.body.data.status).toBe("PENDING");
+  });
 });

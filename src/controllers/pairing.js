@@ -8,7 +8,7 @@
 import { asyncHandler } from "../middleware/error-handler.js";
 import { HTTP_STATUS_CODES } from "../config/constants.js";
 import { assertAttendant } from "../utils/authorization.js";
-import { stepFramesOrThrow } from "../utils/liveness-frames.js";
+import { framesOrThrow, stepFramesOrThrow } from "../utils/liveness-frames.js";
 import * as pairingService from "../services/pairing.service.js";
 import * as attendanceService from "../services/attendance.service.js";
 import * as faceScanService from "../services/face-scan.service.js";
@@ -56,6 +56,68 @@ export const getPairingContext = asyncHandler(async (req, res, _next) => {
       eventId: req.handoff.eventId,
       mode: req.handoff.mode,
     },
+  });
+});
+
+// Phone, batch flow: mint a batch challenge. The phone prompts every action
+// locally and uploads one burst to /session/capture. Dispatches by the
+// token's scope; the event/mode are the token's, never the client's.
+export const remoteChallenge = asyncHandler(async (req, res, _next) => {
+  const userId = parseInt(req.user.id);
+  const { scope, eventId, mode } = req.handoff;
+
+  const data =
+    scope === "ENROLL"
+      ? await faceScanService.prepareEnrollmentChallenge(userId)
+      : await attendanceService.prepareAttendanceChallenge(userId, eventId, {
+          venueCode: req.body.venueCode,
+          mode,
+        });
+
+  res.status(HTTP_STATUS_CODES.OK).json({
+    message: "Liveness challenge issued. Follow the on-screen actions.",
+    data,
+  });
+});
+
+// Phone, batch flow: one burst proving every challenged action in order.
+// Reuses the exact batch services; marks the pairing COMPLETED on success so
+// the laptop's poll sees it.
+export const remoteCapture = asyncHandler(async (req, res, _next) => {
+  const userId = parseInt(req.user.id);
+  const { scope, eventId, mode, pairingId } = req.handoff;
+  const frameBuffers = framesOrThrow(req.files);
+
+  let result;
+  if (scope === "ENROLL") {
+    // Multipart fields arrive as strings; the enrollment service wants a real
+    // boolean for the consent gate.
+    const consent = req.body.consent === true || req.body.consent === "true";
+    result = await faceScanService.enrollFaceScan(userId, {
+      frameBuffers,
+      consent,
+      challengeToken: req.body.challengeToken,
+      ip: req.ip,
+    });
+  } else {
+    const payload = {
+      challengeToken: req.body.challengeToken,
+      venueCode: req.body.venueCode,
+      frameBuffers,
+      ip: req.ip,
+    };
+    result =
+      mode === "out"
+        ? { attendance: await attendanceService.checkOut(userId, eventId, payload) }
+        : { attendance: await attendanceService.checkIn(userId, eventId, payload) };
+  }
+
+  // Best-effort: the capture already committed; a failed flip must not 500.
+  await pairingService.completePairing(pairingId).catch(() => undefined);
+
+  res.status(HTTP_STATUS_CODES.OK).json({
+    message: "All done. You can return to your laptop.",
+    data: { done: true, ...result },
   });
 });
 

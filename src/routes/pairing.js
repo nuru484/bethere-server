@@ -10,6 +10,8 @@ import {
   startPairing,
   getPairingStatus,
   getPairingContext,
+  remoteChallenge,
+  remoteCapture,
   remoteStepChallenge,
   remoteStep,
 } from "../controllers/index.js";
@@ -46,6 +48,24 @@ router.get(
 
 // --- Phone (hand-off token) ---
 router.get("/session/context", authenticateHandoff, getPairingContext);
+
+// Batch flow: the phone prompts every challenged action locally (on-device
+// gesture detection) and uploads ONE burst proving all of them in order.
+router.post(
+  "/session/challenge",
+  authenticateHandoff,
+  pairingStartLimiter,
+  remoteChallenge
+);
+
+router.post(
+  "/session/capture",
+  authenticateHandoff,
+  attendanceStepLimiter,
+  frameUpload.array("frames", LIVENESS.MAX_FRAMES),
+  validateImageUploads,
+  remoteCapture
+);
 
 router.post(
   "/session/step-challenge",
