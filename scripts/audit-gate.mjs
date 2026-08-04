@@ -8,19 +8,14 @@
 import { execFile } from "node:child_process";
 
 // GHSA id -> why it is acceptable to ship with.
-const ALLOWLIST = {
-  // brace-expansion DoS via unbounded expansion length (all versions
-  // <= 5.0.7). The only fixed release, 5.0.8, changed the CommonJS export
-  // shape (named `expand` instead of a callable module), which breaks every
-  // old minimatch in the ejs and exceljs dependency chains that reach it, so
-  // it cannot be forced in via overrides. The attack needs an
-  // attacker-controlled glob/brace pattern; every pattern that reaches
-  // brace-expansion here is a fixed, developer-written literal (ejs
-  // internals, archiver file globs), so the vulnerable path cannot be driven
-  // by untrusted input. Remove once ejs/exceljs ship deps on minimatch
-  // >= 10.0.3.
-  "GHSA-mh99-v99m-4gvg": "DoS needs attacker-controlled patterns; none here",
-};
+//
+// Currently empty, and that is the goal state. The brace-expansion DoS
+// advisories that used to sit here are fixed as of the maintenance releases
+// 1.1.18 and 2.1.4, which are pinned per major line in the package.json
+// overrides; the earlier blocker was that the only fix at the time was 5.0.8,
+// whose changed CommonJS export shape broke the old minimatch versions in the
+// ejs and exceljs chains. A same-major patch has no such problem.
+const ALLOWLIST = {};
 
 const FAIL_SEVERITIES = new Set(["high", "critical"]);
 
