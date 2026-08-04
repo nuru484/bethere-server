@@ -1,0 +1,356 @@
+/api/v1/auth/login:
+  post:
+    tags: [Auth]
+    operationId: login
+    summary: Sign in with email and password
+    description: |
+      Resolves the email against administrators first, then attendants, so both
+      principal types use this one endpoint.
+
+      There are two possible 200 responses. Normally the session cookies are
+      set and the account is returned. If the account has two-factor enabled,
+      no session is created; a five-minute pending cookie is set instead and
+      the response carries `twoFactorRequired: true`, and the client continues
+      at `POST /api/v1/auth/login/2fa`.
+
+      Rate limited to 10 **failed** attempts per 15 minutes. Successful logins
+      are not counted, so a legitimate user is never locked out by their own
+      activity.
+    security: []
+    requestBody:
+      required: true
+      content:
+        application/json:
+          schema: { $ref: '#/components/schemas/LoginRequest' }
+    responses:
+      '200':
+        description: Signed in, or a second factor is required.
+        headers:
+          Set-Cookie:
+            description: |
+              `bethere_accessToken` and `bethere_refreshToken` on a completed
+              sign-in, or `bethere_twoFaPending` when a second factor is needed.
+            schema: { type: string }
+        content:
+          application/json:
+            schema:
+              oneOf:
+                - $ref: '#/components/schemas/SessionResponse'
+                - $ref: '#/components/schemas/TwoFactorRequiredResponse'
+      '400': { $ref: '#/components/responses/ValidationError' }
+      '401':
+        description: Wrong email or password. Deliberately identical for both.
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/Error' }
+      '429': { $ref: '#/components/responses/RateLimited' }
+
+/api/v1/auth/login/2fa:
+  post:
+    tags: [Auth]
+    operationId: verifyLoginTwoFactor
+    summary: Complete a two-factor sign-in
+    description: |
+      Second step of a password login for an account with two-factor enabled.
+      Authorized by the `bethere_twoFaPending` cookie set by the first step,
+      not by a session. If that cookie is missing or expired the response is
+      400 and the client must start the login again.
+    security:
+      - twoFactorPendingCookie: []
+    requestBody:
+      required: true
+      content:
+        application/json:
+          schema: { $ref: '#/components/schemas/TwoFactorCodeRequest' }
+    responses:
+      '200':
+        description: Signed in. Session cookies set, pending cookie cleared.
+        headers:
+          Set-Cookie:
+            schema: { type: string }
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/SessionResponse' }
+      '400':
+        description: |
+          The pending login expired, or the code was wrong or already used.
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/Error' }
+      '429': { $ref: '#/components/responses/RateLimited' }
+
+/api/v1/auth/demo-login:
+  post:
+    tags: [Auth]
+    operationId: demoLogin
+    summary: Sign in as a seeded demo account
+    description: |
+      One-click sign-in for evaluating the system. The server holds the demo
+      credentials and picks the account, so no password is sent and none needs
+      publishing.
+
+      **This is the endpoint to call first when trying the API from this page.**
+      It sets the session cookie, after which every authenticated endpoint here
+      works without further setup.
+    security: []
+    requestBody:
+      required: true
+      content:
+        application/json:
+          schema: { $ref: '#/components/schemas/DemoLoginRequest' }
+    responses:
+      '200':
+        description: Signed in as the demo principal for the requested role.
+        headers:
+          Set-Cookie:
+            schema: { type: string }
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/SessionResponse' }
+      '400': { $ref: '#/components/responses/ValidationError' }
+      '404':
+        description: Demo accounts are not seeded in this environment.
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/Error' }
+      '429': { $ref: '#/components/responses/RateLimited' }
+
+/api/v1/auth/otp/request:
+  post:
+    tags: [Auth]
+    operationId: requestLoginOtp
+    summary: Request a one-time login code
+    description: |
+      Passwordless sign-in, step one. Attendants created by an administrator
+      start without a password and use this route.
+
+      The response is identical whether or not the account exists, so the
+      endpoint cannot be used to discover which contacts are registered. Rate
+      limited to 5 per 15 minutes, failing closed.
+    security: []
+    requestBody:
+      required: true
+      content:
+        application/json:
+          schema: { $ref: '#/components/schemas/OtpRequestBody' }
+    responses:
+      '200':
+        description: |
+          Accepted. A code was sent if, and only if, the account exists. The
+          `channel` reflects the delivery route that would be used.
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/ChannelResponse' }
+            example:
+              message: If that account exists, a code is on its way.
+              data: { channel: sms }
+      '400': { $ref: '#/components/responses/ValidationError' }
+      '429': { $ref: '#/components/responses/RateLimited' }
+
+/api/v1/auth/otp/verify:
+  post:
+    tags: [Auth]
+    operationId: verifyLoginOtp
+    summary: Sign in with a one-time code
+    description: |
+      Passwordless sign-in, step two. On success the session cookies are set
+      exactly as they are for a password login.
+    security: []
+    requestBody:
+      required: true
+      content:
+        application/json:
+          schema: { $ref: '#/components/schemas/OtpVerifyRequest' }
+    responses:
+      '200':
+        description: Signed in.
+        headers:
+          Set-Cookie:
+            schema: { type: string }
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/SessionResponse' }
+      '400': { $ref: '#/components/responses/ValidationError' }
+      '401':
+        description: The code was wrong, expired, or already used.
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/Error' }
+      '429': { $ref: '#/components/responses/RateLimited' }
+
+/api/v1/auth/logout:
+  post:
+    tags: [Auth]
+    operationId: logout
+    summary: Sign out
+    description: |
+      Revokes the refresh token server-side and clears every auth cookie.
+      Always answers 200, including when there was no session to begin with,
+      so a client can log out without first checking whether it is signed in.
+    security: []
+    responses:
+      '200':
+        description: Signed out. Cookies cleared.
+        headers:
+          Set-Cookie:
+            description: Expired `bethere_accessToken`, `bethere_refreshToken`, and `bethere_twoFaPending`.
+            schema: { type: string }
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [message, data]
+              properties:
+                message: { type: string, examples: [Logged out] }
+                data:
+                  type: 'null'
+
+/api/v1/auth/me:
+  get:
+    tags: [Auth]
+    operationId: getCurrentPrincipal
+    summary: Get the signed-in account
+    description: |
+      Resolves the session cookie to the current account. Clients call this on
+      load and hold the result in memory, which is why the account never needs
+      persisting to localStorage.
+    responses:
+      '200':
+        description: The current account.
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [message, data]
+              properties:
+                message: { type: string, examples: [Current user] }
+                data:
+                  type: object
+                  required: [user]
+                  properties:
+                    user: { $ref: '#/components/schemas/Principal' }
+      '401': { $ref: '#/components/responses/Unauthorized' }
+
+/api/v1/auth/2fa/challenge:
+  post:
+    tags: [Auth]
+    operationId: sendTwoFactorChallenge
+    summary: Send a code to confirm a two-factor change
+    description: |
+      Sends a verification code to the signed-in account's own contact. Used to
+      confirm enabling or disabling two-factor, so neither can be toggled by
+      someone who merely has an unlocked session.
+    responses:
+      '200':
+        description: A code was dispatched.
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/ChannelResponse' }
+            example:
+              message: We sent you a verification code.
+              data: { channel: email }
+      '401': { $ref: '#/components/responses/Unauthorized' }
+      '429': { $ref: '#/components/responses/RateLimited' }
+
+/api/v1/auth/2fa/enable:
+  post:
+    tags: [Auth]
+    operationId: enableTwoFactor
+    summary: Turn on two-factor authentication
+    description: Requires a current code from `POST /api/v1/auth/2fa/challenge`.
+    requestBody:
+      required: true
+      content:
+        application/json:
+          schema: { $ref: '#/components/schemas/TwoFactorCodeRequest' }
+    responses:
+      '200':
+        description: Two-factor is on. Returns the updated account.
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [message, data]
+              properties:
+                message: { type: string, examples: [Two-factor authentication is now on.] }
+                data:
+                  type: object
+                  required: [user]
+                  properties:
+                    user: { $ref: '#/components/schemas/Principal' }
+      '400': { $ref: '#/components/responses/ValidationError' }
+      '401': { $ref: '#/components/responses/Unauthorized' }
+
+/api/v1/auth/2fa/disable:
+  post:
+    tags: [Auth]
+    operationId: disableTwoFactor
+    summary: Turn off two-factor authentication
+    description: Requires a current code from `POST /api/v1/auth/2fa/challenge`.
+    requestBody:
+      required: true
+      content:
+        application/json:
+          schema: { $ref: '#/components/schemas/TwoFactorCodeRequest' }
+    responses:
+      '200':
+        description: Two-factor is off. Returns the updated account.
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [message, data]
+              properties:
+                message: { type: string, examples: [Two-factor authentication is now off.] }
+                data:
+                  type: object
+                  required: [user]
+                  properties:
+                    user: { $ref: '#/components/schemas/Principal' }
+      '400': { $ref: '#/components/responses/ValidationError' }
+      '401': { $ref: '#/components/responses/Unauthorized' }
+
+/api/v1/refreshToken:
+  post:
+    tags: [Auth]
+    operationId: refreshSession
+    summary: Rotate the session
+    description: |
+      Exchanges the refresh cookie for a fresh access and refresh pair.
+
+      Rotation is one-time-use: each refresh consumes its token id. Presenting
+      a consumed token is treated as theft rather than a retry, and invalidates
+      every outstanding token for that account by bumping its token version,
+      which forces a full re-login on all devices.
+
+      The path is camelCase, unlike every other route here, because deployed
+      clients already call it and the compatibility is worth more than the
+      consistency.
+    security:
+      - refreshCookie: []
+    responses:
+      '200':
+        description: New cookie pair set.
+        headers:
+          Set-Cookie:
+            schema: { type: string }
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [message, data]
+              properties:
+                message: { type: string, examples: [Token refreshed] }
+                data:
+                  type: object
+                  required: [user]
+                  properties:
+                    user: { $ref: '#/components/schemas/Principal' }
+      '401':
+        description: |
+          The refresh cookie was missing, expired, or already consumed. A
+          consumed token also revokes the whole family.
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/Error' }
+      '429': { $ref: '#/components/responses/RateLimited' }

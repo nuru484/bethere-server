@@ -1,0 +1,111 @@
+/health:
+  get:
+    tags: [Health]
+    operationId: healthLiveness
+    summary: Liveness probe
+    description: |
+      Answers as soon as the process can serve a request. It deliberately
+      touches no dependency, so a database or Redis outage never causes the
+      platform to kill and restart an otherwise healthy process.
+
+      Mounted ahead of the API router, so probe traffic never runs business
+      middleware, and excluded from access logging because a poller every few
+      seconds is noise rather than traffic.
+    security: []
+    responses:
+      '200':
+        description: The process is up.
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [status]
+              properties:
+                status:
+                  type: string
+                  const: ok
+
+/health/db:
+  get:
+    tags: [Health]
+    operationId: healthDatabase
+    summary: Database probe
+    description: |
+      Runs a trivial query against PostgreSQL. Separate from liveness so an
+      operator can tell "the process is wedged" apart from "the database is
+      unreachable" without reading logs.
+    security: []
+    responses:
+      '200':
+        description: The database answered.
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [status, db]
+              properties:
+                status: { type: string, const: ok }
+                db: { type: string, const: up }
+      '503':
+        description: The database did not answer.
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [status, db]
+              properties:
+                status: { type: string, const: error }
+                db: { type: string, const: down }
+
+/health/ready:
+  get:
+    tags: [Health]
+    operationId: healthReadiness
+    summary: Readiness probe
+    description: |
+      Checks every hard dependency and is what a load balancer should gate on.
+
+      Redis is included deliberately. The credential rate limiters fail closed,
+      so with Redis down login and one-time-code requests reject while a
+      database-only check would still report green. Reporting ready in that
+      state would route real users to an instance that cannot sign anyone in.
+    security: []
+    responses:
+      '200':
+        description: Every dependency is reachable.
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/ReadinessReport' }
+            example: { status: ok, db: up, redis: up }
+      '503':
+        description: At least one dependency is unreachable. The body names which.
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/ReadinessReport' }
+            example: { status: error, db: up, redis: down }
+
+/:
+  get:
+    tags: [Health]
+    operationId: apiRoot
+    summary: Service banner
+    description: |
+      A human-friendly "you have reached the API" response for anyone who opens
+      the base URL in a browser.
+
+      Note that this is the only endpoint in the service whose body carries a
+      `success` flag. Everything else answers with `message` and `data`, or with
+      the standard error envelope. The inconsistency is documented rather than
+      corrected because deployed clients may already read it.
+    security: []
+    responses:
+      '200':
+        description: The service is reachable.
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [success, message]
+              properties:
+                success: { type: boolean, const: true }
+                message: { type: string, examples: [API is working] }

@@ -1,0 +1,1372 @@
+# Dashboard analytics components.
+#
+# Two generations of dashboard live side by side. The legacy totals and
+# attendance-data payloads are what the first release shipped and are kept
+# because deployed clients still read them. Everything else is the "slice"
+# redesign: one endpoint per widget, so a board fills in progressively and a
+# single failing chart never blanks the page.
+#
+# Every slice is computed on the VENUE calendar (EVENT_TIMEZONE), never the
+# server's local clock, so a "day" here means the same day the check-in path
+# used when it decided PRESENT versus LATE.
+
+parameters:
+  DashboardPresenceDimension:
+    name: by
+    in: query
+    required: false
+    description: |
+      Which axis to slice presence along. An unrecognized value is not an
+      error: it falls back to `status`, and the echoed `by` in the response
+      tells you which dimension was actually used.
+
+      `event` and `location` are top-10 cuts ordered by attendance volume, so
+      a deployment with hundreds of events still returns a chart a human can
+      read rather than a legend the length of the roster.
+    schema:
+      type: string
+      enum: [status, eventType, event, location]
+      default: status
+
+  DashboardAnomalyDimension:
+    name: by
+    in: query
+    required: false
+    description: |
+      Which axis to slice anomalies along: the kind of signal that fired, or
+      how serious it was judged. Anything other than `severity` is treated as
+      `type`, and the response echoes the dimension it used.
+    schema:
+      type: string
+      enum: [type, severity]
+      default: type
+
+  DashboardTopAttendeesLimit:
+    name: limit
+    in: query
+    required: false
+    description: |
+      How many leaderboard rows to return. Clamped into 1 to 50 rather than
+      rejected, and a non-numeric value falls back to 10, so a malformed
+      control on the page degrades to the default instead of erroring.
+
+      This is not pagination: there is no page cursor and no `meta` block. The
+      leaderboard is a fixed top-N cut, because ranking past the top few
+      attendees is a report, not a dashboard widget.
+    schema:
+      type: integer
+      minimum: 1
+      maximum: 50
+      default: 10
+
+  DashboardRetentionEventId:
+    name: eventId
+    in: query
+    required: false
+    description: |
+      Which recurring event to draw the retention curve for. Omit it and the
+      server picks the recurring event with the most occurrences, so the chart
+      is never empty on first load.
+
+      A non-numeric value, an unknown id, or the id of a one-off event all
+      fall back to that same default rather than answering 404. The response
+      always names the event it actually used and lists the recurring events
+      available, which is what populates the selector.
+    schema:
+      type: integer
+      minimum: 1
+
+responses:
+  DashboardRangeError:
+    description: |
+      The requested window could not be resolved. Both causes are 400 and both
+      carry a plain message rather than per-field `details.errors`, because
+      these are query-shape failures rather than a body schema failure:
+
+      - an unknown `preset`, a `startDate` or `endDate` that is not
+        `YYYY-MM-DD`, only one half of a custom range, or a `startDate` after
+        the `endDate`, and
+      - a window wider than 400 days, which is refused outright. Beyond about
+        a year of chart there is no dashboard use case left, only an unbounded
+        scan on a hot page.
+    headers:
+      X-Request-Id: { $ref: '#/components/headers/XRequestId' }
+    content:
+      application/json:
+        schema: { $ref: '#/components/schemas/Error' }
+        example:
+          status: error
+          message: Date range too large. Maximum is 400 days.
+          requestId: 3f1c9d2e-5b7a-4c11-9f60-2a8e4d0b7c31
+
+schemas:
+  DashboardRange:
+    type: object
+    description: |
+      The window the numbers were actually computed over, echoed back so a
+      chart can label its own axis without re-deriving the dates the server
+      chose.
+    required: [preset, from, to]
+    properties:
+      preset:
+        type: [string, 'null']
+        description: |
+          The named window that was resolved, or null when an explicit
+          `startDate` and `endDate` pair was supplied.
+
+          The accepted presets are `today`, `yesterday`, `this_week`,
+          `last_7_days`, `this_month`, `last_month`, `last_30_days`,
+          `this_quarter`, `last_quarter`, `this_year`, `last_year`, and
+          `last_90_days`. When nothing is sent at all the server resolves
+          `this_month`.
+        examples: [this_month]
+      from:
+        type: string
+        format: date
+        description: First venue day in the window, inclusive.
+        examples: ['2026-03-10']
+      to:
+        type: string
+        format: date
+        description: Last venue day in the window, inclusive.
+        examples: ['2026-03-11']
+
+  DashboardBucketedRange:
+    description: |
+      A window that also carries the bucket size the accompanying time series
+      was drawn at. The server picks it from the window length rather than
+      taking it from the client, so a year-long range never comes back as 365
+      unreadable points.
+    allOf:
+      - $ref: '#/components/schemas/DashboardRange'
+      - type: object
+        required: [granularity]
+        properties:
+          granularity:
+            type: string
+            description: |
+              `hour` for a single day, `day` up to 31 days, `week` up to 92,
+              and `month` beyond that.
+            enum: [hour, day, week, month]
+            examples: [day]
+
+  DashboardDayWindow:
+    type: object
+    description: |
+      A bare venue-day window, used where the payload is already keyed by
+      calendar date and the preset would add nothing.
+    required: [from, to]
+    properties:
+      from: { type: string, format: date, examples: ['2026-03-10'] }
+      to: { type: string, format: date, examples: ['2026-03-11'] }
+
+  DashboardTrend:
+    type: object
+    description: |
+      Period-over-period movement against the immediately preceding window of
+      identical length. The percentage is always positive; `direction` carries
+      the sign, so the UI can render an arrow without doing arithmetic.
+
+      A metric that had no data at all last period reads as `upward` at 100,
+      which is the honest rendering of growth from a zero baseline rather than
+      a divide-by-zero hole in the card.
+    required: [direction, percentage]
+    properties:
+      direction:
+        type: string
+        enum: [upward, downward, neutral]
+        examples: [upward]
+      percentage:
+        type: number
+        minimum: 0
+        description: Absolute change, to two decimal places.
+        examples: [12.5]
+
+  DashboardMetric:
+    type: object
+    description: |
+      One headline number on a KPI card. `unit` tells the client how to format
+      the value and `inverse` tells it how to color the arrow, so the same
+      card component renders an attendance rate and an anomaly count without
+      knowing what either means.
+    required: [value, unit]
+    properties:
+      value:
+        type: number
+        description: The measurement itself, in `unit`.
+        examples: [75]
+      unit:
+        type: string
+        description: |
+          `percent` values are 0 to 100 with two decimals, `count` values are
+          whole rows, and `minutes` values are rounded to one decimal.
+        enum: [percent, count, minutes]
+        examples: [percent]
+      inverse:
+        type: boolean
+        description: |
+          Present and true only on metrics where a fall is the good news,
+          namely average lateness and anomaly volume. Without it a dashboard
+          would paint a drop in anomalies red.
+        examples: [true]
+      trend: { $ref: '#/components/schemas/DashboardTrend' }
+      meta:
+        type: object
+        description: |
+          The raw counts the value was derived from, so a card can show its
+          own working ("75%, 3 of 4") without a second request. The keys
+          differ per metric and are listed on each endpoint.
+        additionalProperties:
+          type: number
+
+  DashboardSegment:
+    type: object
+    description: A single slice of a categorical breakdown, sized for a donut or bar.
+    required: [key, label, count, percentage]
+    properties:
+      key:
+        type: string
+        description: Stable machine identifier. Safe to switch on, unlike `label`.
+        examples: [PRESENT]
+      label:
+        type: string
+        description: Display text. Human wording only, never branch on it.
+        examples: [Present]
+      count: { type: integer, minimum: 0, examples: [2] }
+      percentage:
+        type: number
+        description: Share of the breakdown total, two decimals, zero when the total is zero.
+        examples: [50]
+
+  DashboardHistogramBin:
+    type: object
+    description: One bucket of a distribution, labelled by its own edges.
+    required: [label, count]
+    properties:
+      label: { type: string, examples: ['0.2-0.4'] }
+      count: { type: integer, minimum: 0, examples: [1] }
+
+  DashboardLabelledCount:
+    type: object
+    description: |
+      A count against a known catalog entry. Every entry in the catalog is
+      returned even when its count is zero, so a chart's categories stay in a
+      fixed order across refreshes instead of reshuffling as data arrives.
+    required: [key, label, count]
+    properties:
+      key: { type: string, examples: [LIVENESS_FAILED] }
+      label: { type: string, examples: [Liveness failed] }
+      count: { type: integer, minimum: 0, examples: [1] }
+
+  DashboardStatusCounts:
+    type: object
+    description: Attendance rows by status, with their sum.
+    required: [present, late, absent, total]
+    properties:
+      present: { type: integer, minimum: 0, examples: [2] }
+      late: { type: integer, minimum: 0, examples: [1] }
+      absent: { type: integer, minimum: 0, examples: [1] }
+      total: { type: integer, minimum: 0, examples: [4] }
+
+  DashboardStatusPercentages:
+    type: object
+    description: |
+      The same split as shares of the total. These are fixed-point **strings**,
+      not numbers, because the legacy bar chart renders them verbatim and a
+      float would lose the trailing zero. Everything in the redesigned slices
+      returns percentages as numbers instead.
+    required: [present, late, absent]
+    properties:
+      present: { type: string, examples: ['50.00'] }
+      late: { type: string, examples: ['25.00'] }
+      absent: { type: string, examples: ['25.00'] }
+
+  DashboardEventTypeBreakdown:
+    type: object
+    description: Attendance split by whether the event repeats or happens once.
+    required: [recurring, nonRecurring]
+    properties:
+      recurring: { type: integer, minimum: 0, examples: [3] }
+      nonRecurring: { type: integer, minimum: 0, examples: [1] }
+
+  DashboardEventRef:
+    type: object
+    description: The minimum needed to name an event in a selector.
+    required: [id, title]
+    properties:
+      id: { type: integer, examples: [7] }
+      title: { type: string, examples: [Recurring Event] }
+
+  DashboardSessionEvent:
+    type: object
+    description: |
+      The event behind a session, trimmed to what a dashboard card shows.
+      `startTime` and `endTime` are the venue wall-clock window attendance is
+      open in, stored as `HH:MM` strings rather than instants because they
+      apply to every occurrence of a recurring event alike.
+    required: [id, title, type, startTime, endTime, location]
+    properties:
+      id: { type: integer, examples: [7] }
+      title: { type: string, examples: [Weekly Standup] }
+      type: { type: string, examples: [MEETING] }
+      startTime: { type: string, examples: ['09:00'] }
+      endTime: { type: string, examples: ['17:00'] }
+      location:
+        type: object
+        description: Always present. Every event is anchored to exactly one venue.
+        required: [name]
+        properties:
+          name: { type: string, examples: [Main Hall] }
+          city: { type: [string, 'null'], examples: [Accra] }
+
+  DashboardUpcomingSession:
+    type: object
+    description: |
+      A session the signed-in attendant could attend, annotated with the two
+      facts the check-in button needs: whether it falls on the venue's today,
+      and whether its attendance window is open at this moment.
+    required: [sessionId, startDate, isToday, isOpenNow, event]
+    properties:
+      sessionId: { type: integer, examples: [41] }
+      startDate: { type: string, format: date-time }
+      isToday:
+        type: boolean
+        description: Whether the session's date window covers the venue's current calendar day.
+      isOpenNow:
+        type: boolean
+        description: |
+          Whether the venue clock is inside the event's `startTime` to
+          `endTime` window right now. Only an open session can be checked into.
+      event: { $ref: '#/components/schemas/DashboardSessionEvent' }
+
+  DashboardUserTotals:
+    type: object
+    description: |
+      Platform event and session counts for the attendant landing cards. These
+      are system-wide numbers rather than anything personal, which is exactly
+      why the redesigned attendant slices exist alongside them.
+    required: [totalRecurringEvents, totalNonRecurringEvents, totalActiveSessions, totalInactiveSessions]
+    properties:
+      totalRecurringEvents: { type: integer, minimum: 0, examples: [1] }
+      totalNonRecurringEvents: { type: integer, minimum: 0, examples: [1] }
+      totalActiveSessions:
+        type: integer
+        minimum: 0
+        description: |
+          Sessions whose date window covers the venue's today and whose event
+          wall-clock window is open at this instant.
+        examples: [0]
+      totalInactiveSessions:
+        type: integer
+        minimum: 0
+        description: Every other session ever created, active ones subtracted.
+        examples: [3]
+
+  DashboardRecentEvent:
+    type: object
+    description: |
+      One entry in the recently created events strip. Deliberately identifier
+      free: it is a read-only teaser, so it carries no id to navigate by.
+    required: [title, description, startTime, endTime, location]
+    properties:
+      title: { type: string, examples: [Weekly Standup] }
+      description: { type: [string, 'null'] }
+      startTime: { type: string, examples: ['09:00'] }
+      endTime: { type: string, examples: ['17:00'] }
+      location:
+        type: object
+        required: [name]
+        properties:
+          name: { type: string, examples: [Main Hall] }
+          city: { type: [string, 'null'], examples: [Accra] }
+
+  DashboardUserAttendanceDay:
+    type: object
+    description: |
+      One venue day of the signed-in attendant's history. `events` lists the
+      distinct event titles touched that day, which is what lets the legacy
+      calendar tooltip name them without a second lookup.
+    required: [date, total, present, late, absent, recurringEvents, nonRecurringEvents, events]
+    properties:
+      date: { type: string, format: date, examples: ['2026-03-10'] }
+      total: { type: integer, minimum: 0, examples: [1] }
+      present: { type: integer, minimum: 0, examples: [1] }
+      late: { type: integer, minimum: 0, examples: [0] }
+      absent: { type: integer, minimum: 0, examples: [0] }
+      recurringEvents: { type: integer, minimum: 0, examples: [1] }
+      nonRecurringEvents: { type: integer, minimum: 0, examples: [0] }
+      events:
+        type: array
+        items: { type: string }
+        examples: [[Recurring Event]]
+
+  DashboardUserAttendanceData:
+    type: object
+    description: |
+      The legacy personal attendance report: a summary plus one row per venue
+      day that has activity. Days with no records are omitted entirely rather
+      than zero-filled, so a sparse history stays small.
+    required: [summary, attendanceByDate]
+    properties:
+      summary:
+        type: object
+        required: [totalAttendances, dateRange, statusBreakdown, eventTypeBreakdown]
+        properties:
+          totalAttendances: { type: integer, minimum: 0, examples: [2] }
+          dateRange: { $ref: '#/components/schemas/DashboardDayWindow' }
+          statusBreakdown:
+            type: object
+            required: [present, late, absent]
+            properties:
+              present: { type: integer, minimum: 0, examples: [2] }
+              late: { type: integer, minimum: 0, examples: [0] }
+              absent: { type: integer, minimum: 0, examples: [0] }
+          eventTypeBreakdown: { $ref: '#/components/schemas/DashboardEventTypeBreakdown' }
+      attendanceByDate:
+        type: array
+        items: { $ref: '#/components/schemas/DashboardUserAttendanceDay' }
+
+  DashboardAdminTotals:
+    type: object
+    description: Roster and event counts for the administrator landing cards.
+    required: [totalUsers, totalRecurringEvents, totalNonRecurringEvents, totalEvents]
+    properties:
+      totalUsers:
+        type: integer
+        minimum: 0
+        description: Attendant accounts. Administrators are a separate table and are not counted here.
+        examples: [2]
+      totalRecurringEvents: { type: integer, minimum: 0, examples: [1] }
+      totalNonRecurringEvents: { type: integer, minimum: 0, examples: [1] }
+      totalEvents: { type: integer, minimum: 0, examples: [2] }
+
+  DashboardAdminAttendanceDay:
+    type: object
+    description: |
+      One venue day of platform-wide attendance. `uniqueUsers` is a distinct
+      count within the day, so it cannot be summed across days to get a period
+      total: the period figure is a separate distinct count on the summary.
+    required: [date, total, present, late, absent, uniqueUsers]
+    properties:
+      date: { type: string, format: date, examples: ['2026-03-10'] }
+      total: { type: integer, minimum: 0, examples: [3] }
+      present: { type: integer, minimum: 0, examples: [1] }
+      late: { type: integer, minimum: 0, examples: [1] }
+      absent: { type: integer, minimum: 0, examples: [1] }
+      uniqueUsers: { type: integer, minimum: 0, examples: [2] }
+
+  DashboardAdminAttendanceData:
+    type: object
+    description: |
+      The legacy platform-wide attendance report. `statusCounts` and
+      `statusPercentages` appear twice, once nested under `summary` and once at
+      the top level, because the original charts read them from the top level
+      and the duplication is cheaper than breaking deployed clients.
+    required: [summary, timeSeriesData, statusPercentages, statusCounts]
+    properties:
+      summary:
+        type: object
+        required: [dateRange, totalAttendances, uniqueUsersAttended, statusCounts, statusPercentages, eventTypeBreakdown]
+        properties:
+          dateRange: { $ref: '#/components/schemas/DashboardDayWindow' }
+          totalAttendances: { type: integer, minimum: 0, examples: [4] }
+          uniqueUsersAttended:
+            type: integer
+            minimum: 0
+            description: Distinct attendants with any record in the window, counted once across the whole period.
+            examples: [2]
+          statusCounts: { $ref: '#/components/schemas/DashboardStatusCounts' }
+          statusPercentages: { $ref: '#/components/schemas/DashboardStatusPercentages' }
+          eventTypeBreakdown: { $ref: '#/components/schemas/DashboardEventTypeBreakdown' }
+      timeSeriesData:
+        type: array
+        description: One entry per venue day that has records, ascending. Empty days are omitted.
+        items: { $ref: '#/components/schemas/DashboardAdminAttendanceDay' }
+      statusPercentages: { $ref: '#/components/schemas/DashboardStatusPercentages' }
+      statusCounts: { $ref: '#/components/schemas/DashboardStatusCounts' }
+
+  DashboardUserNowNext:
+    type: object
+    description: |
+      The bridge between the attendant dashboard and the act of checking in:
+      what the signed-in attendant is currently inside, what is coming, and
+      whether the check-in button should be live.
+    required: [checkedIn, next, canCheckIn, upcoming]
+    properties:
+      checkedIn:
+        type: [object, 'null']
+        description: |
+          The attendant's open check-in for a session covering today, or null
+          when they are not currently inside one. Open means checked in with no
+          check-out recorded yet.
+        required: [sessionId, checkInTime, event]
+        properties:
+          sessionId: { type: integer, examples: [41] }
+          checkInTime: { type: string, format: date-time }
+          event: { $ref: '#/components/schemas/DashboardSessionEvent' }
+      next:
+        description: |
+          The session to act on: whichever upcoming session is open right now
+          if there is one, otherwise the soonest one. Null when nothing is
+          scheduled from today onward.
+        oneOf:
+          - $ref: '#/components/schemas/DashboardUpcomingSession'
+          - type: 'null'
+      canCheckIn:
+        type: boolean
+        description: |
+          True only when `next` is open at this instant and the attendant is
+          not already checked in. This is the single flag the check-in button
+          binds to, so the client never has to re-derive venue time itself.
+        examples: [false]
+      upcoming:
+        type: array
+        maxItems: 4
+        description: The next few sessions after `next`, for the "coming up" list.
+        items: { $ref: '#/components/schemas/DashboardUpcomingSession' }
+
+  DashboardUserKpis:
+    type: object
+    description: |
+      The signed-in attendant's headline numbers, each against the immediately
+      preceding window of the same length.
+    required: [range, kpis]
+    properties:
+      range: { $ref: '#/components/schemas/DashboardBucketedRange' }
+      kpis:
+        type: object
+        required: [attendanceRate, onTimeRate, attended, currentStreak]
+        properties:
+          attendanceRate:
+            description: |
+              Share of the attendant's own records in the window where they
+              showed up at all, present or late. `meta` carries `present`,
+              `late`, `absent`, and `total`.
+            allOf: [{ $ref: '#/components/schemas/DashboardMetric' }]
+          onTimeRate:
+            description: |
+              Of the sessions they did attend, the share they reached before
+              the scheduled open. `meta` carries `present` and `attended`.
+              Someone who never misses a session but always arrives late reads
+              100 here on attendance and 0 here on punctuality, which is the
+              distinction a single "attendance" number hides.
+            allOf: [{ $ref: '#/components/schemas/DashboardMetric' }]
+          attended:
+            description: Sessions actually turned up for, present plus late. `meta` carries `present` and `late`.
+            allOf: [{ $ref: '#/components/schemas/DashboardMetric' }]
+          currentStreak:
+            description: |
+              Consecutive most-recent sessions attended, counting back from the
+              latest and stopping at the first miss. Deliberately ignores the
+              selected range: a streak is a property of the attendant's whole
+              history, and resetting it because someone scrubbed the date
+              picker would be meaningless. Carries no trend for the same reason.
+            allOf: [{ $ref: '#/components/schemas/DashboardMetric' }]
+
+  DashboardUserTrendPoint:
+    type: object
+    description: One bucket of the attendant's own attendance history.
+    required: [label, present, late, absent, total, attendanceRate]
+    properties:
+      label:
+        type: string
+        description: |
+          The x-axis key for this bucket, formatted for the resolved
+          granularity: `HH:00` for hour, `YYYY-MM-DD` for day and week (the
+          week's Monday), `YYYY-MM` for month.
+        examples: ['2026-03-10']
+      present: { type: integer, minimum: 0, examples: [1] }
+      late: { type: integer, minimum: 0, examples: [0] }
+      absent: { type: integer, minimum: 0, examples: [0] }
+      total: { type: integer, minimum: 0, examples: [1] }
+      attendanceRate: { type: number, examples: [100] }
+
+  DashboardUserAttendanceTrend:
+    type: object
+    description: |
+      The attendant's personal attendance over time, zero-filled across every
+      bucket in the window so a chart line never breaks at a quiet week.
+    required: [range, timeSeries]
+    properties:
+      range: { $ref: '#/components/schemas/DashboardBucketedRange' }
+      timeSeries:
+        type: array
+        items: { $ref: '#/components/schemas/DashboardUserTrendPoint' }
+
+  DashboardUserStatusBreakdown:
+    type: object
+    description: |
+      The attendant's present, late, and absent split. All three segments are
+      always returned, in that order, even at zero.
+    required: [range, segments]
+    properties:
+      range: { $ref: '#/components/schemas/DashboardRange' }
+      segments:
+        type: array
+        minItems: 3
+        maxItems: 3
+        items: { $ref: '#/components/schemas/DashboardSegment' }
+
+  DashboardUserEventSegment:
+    type: object
+    description: |
+      The attendant's record against one event. `count` is turnout (present
+      plus late) while `total` is every record including misses, so the two
+      together show both volume and reliability.
+    required: [key, label, count, total, present, late, absent, attendanceRate]
+    properties:
+      key: { type: integer, description: Event id., examples: [7] }
+      label: { type: string, examples: [Recurring Event] }
+      count: { type: integer, minimum: 0, examples: [2] }
+      total: { type: integer, minimum: 0, examples: [2] }
+      present: { type: integer, minimum: 0, examples: [2] }
+      late: { type: integer, minimum: 0, examples: [0] }
+      absent: { type: integer, minimum: 0, examples: [0] }
+      attendanceRate: { type: number, examples: [100] }
+
+  DashboardUserEventBreakdown:
+    type: object
+    description: |
+      Which events the attendant actually shows up for, their ten busiest
+      first. Events they have no records against in the window do not appear.
+    required: [range, segments]
+    properties:
+      range: { $ref: '#/components/schemas/DashboardRange' }
+      segments:
+        type: array
+        maxItems: 10
+        items: { $ref: '#/components/schemas/DashboardUserEventSegment' }
+
+  DashboardCalendarDay:
+    type: object
+    description: |
+      One venue day in the attendant's calendar heatmap. `status` is the best
+      outcome reached that day, ranking present above late above absent, so a
+      day with two records and one good one still reads as a good day.
+    required: [date, status, present, late, absent, total]
+    properties:
+      date: { type: string, format: date, examples: ['2026-03-10'] }
+      status:
+        type: string
+        description: Lowercase here, unlike the uppercase status keys used in breakdowns.
+        enum: [present, late, absent]
+        examples: [present]
+      present: { type: integer, minimum: 0, examples: [1] }
+      late: { type: integer, minimum: 0, examples: [0] }
+      absent: { type: integer, minimum: 0, examples: [0] }
+      total: { type: integer, minimum: 0, examples: [1] }
+
+  DashboardUserCalendar:
+    type: object
+    description: |
+      Per-day outcomes for the contribution-graph style heatmap. Only days with
+      records are returned; the client paints the gaps as blank.
+    required: [range, days]
+    properties:
+      range: { $ref: '#/components/schemas/DashboardDayWindow' }
+      days:
+        type: array
+        items: { $ref: '#/components/schemas/DashboardCalendarDay' }
+
+  DashboardLiveSnapshot:
+    type: object
+    description: |
+      The state of the floor right now. Nothing here is date-filtered, and
+      "today" means the venue's calendar day rather than the server's.
+    required:
+      [asOf, sessionsToday, sessionsLiveNow, checkedInNow, checkInsToday, presentToday,
+       lateToday, openAnomalies, highSeverityOpenAnomalies, anomaliesToday]
+    properties:
+      asOf:
+        type: string
+        format: date-time
+        description: |
+          The instant the snapshot was taken. Returned so a polling client can
+          show how stale its strip is rather than implying the numbers are live.
+      sessionsToday:
+        type: integer
+        minimum: 0
+        description: Sessions whose date window covers the venue's today, open or not.
+        examples: [0]
+      sessionsLiveNow:
+        type: integer
+        minimum: 0
+        description: Of those, the ones whose wall-clock attendance window is open at this instant.
+        examples: [0]
+      checkedInNow:
+        type: integer
+        minimum: 0
+        description: |
+          People believed to be physically on site: checked into a currently
+          open session, with no check-out recorded and not swept up by the
+          automatic session close. This is the number an evacuation roll call
+          would use, which is why auto-checked-out rows are excluded.
+        examples: [0]
+      checkInsToday:
+        type: integer
+        minimum: 0
+        description: Successful check-ins today, present plus late. Cumulative, unlike `checkedInNow`.
+        examples: [0]
+      presentToday: { type: integer, minimum: 0, examples: [0] }
+      lateToday: { type: integer, minimum: 0, examples: [0] }
+      openAnomalies:
+        type: integer
+        minimum: 0
+        description: |
+          Every unresolved anomaly flag ever raised, not just today's. It is a
+          review backlog, so ageing items must stay visible.
+        examples: [0]
+      highSeverityOpenAnomalies: { type: integer, minimum: 0, examples: [0] }
+      anomaliesToday:
+        type: integer
+        minimum: 0
+        description: Flags raised since the start of the venue's today, resolved or not.
+        examples: [0]
+
+  DashboardAdminKpis:
+    type: object
+    description: |
+      The hero row. BeThere is an integrity product, so the headline numbers
+      are presence, punctuality, and integrity rather than inert row counts,
+      and each carries a period-over-period trend.
+    required: [range, kpis]
+    properties:
+      range: { $ref: '#/components/schemas/DashboardBucketedRange' }
+      kpis:
+        type: object
+        required: [attendanceRate, punctualityRate, uniqueAttendees, avgLateness, anomalies, enrollmentCoverage]
+        properties:
+          attendanceRate:
+            description: |
+              Share of expected attendance that materialized, present plus late
+              over all records. `meta` carries `present`, `late`, `absent`, and
+              `total`.
+            allOf: [{ $ref: '#/components/schemas/DashboardMetric' }]
+          punctualityRate:
+            description: |
+              Of those who turned up, the share who did so before the scheduled
+              open. `meta` carries `present`, `late`, and `showed`.
+            allOf: [{ $ref: '#/components/schemas/DashboardMetric' }]
+          uniqueAttendees:
+            description: Distinct attendants with at least one check-in in the window.
+            allOf: [{ $ref: '#/components/schemas/DashboardMetric' }]
+          avgLateness:
+            description: |
+              Mean minutes between the scheduled open and the actual check-in,
+              floored at zero so an early arrival does not read as negative
+              lateness and cancel out a genuinely late one. Marked `inverse`.
+            allOf: [{ $ref: '#/components/schemas/DashboardMetric' }]
+          anomalies:
+            description: |
+              Flags raised in the window. `meta.open` is the total unresolved
+              backlog across all time, which is why it can exceed `value`.
+              Marked `inverse`.
+            allOf: [{ $ref: '#/components/schemas/DashboardMetric' }]
+          enrollmentCoverage:
+            description: |
+              Share of attendants with a face template enrolled. Not
+              range-dependent and so carries no trend: it is the ceiling on how
+              much of the roster can check in at all, which makes a low value
+              the first thing to fix before any other number here is trustworthy.
+              `meta` carries `enrolled` and `totalUsers`.
+            allOf: [{ $ref: '#/components/schemas/DashboardMetric' }]
+
+  DashboardPresenceTrendPoint:
+    type: object
+    description: One bucket of the platform-wide attendance series.
+    required: [label, present, late, absent, total, uniqueUsers, attendanceRate, previousTotal]
+    properties:
+      label: { type: string, examples: ['2026-03-10'] }
+      present: { type: integer, minimum: 0, examples: [1] }
+      late: { type: integer, minimum: 0, examples: [1] }
+      absent: { type: integer, minimum: 0, examples: [1] }
+      total: { type: integer, minimum: 0, examples: [3] }
+      uniqueUsers: { type: integer, minimum: 0, examples: [2] }
+      attendanceRate: { type: number, examples: [66.67] }
+      previousTotal:
+        type: [integer, 'null']
+        description: |
+          The same bucket's total one window back, for the comparison overlay.
+          Null on every point when the preceding window does not bucket to the
+          same number of points, which happens where a window straddles month
+          boundaries. Dropping the whole overlay is better than drawing one
+          whose points are silently misaligned by a day.
+        examples: [0]
+
+  DashboardPresenceTrend:
+    type: object
+    description: |
+      Attendance over time with a rate line and a previous-period overlay, plus
+      period totals so the header does not need a second request.
+    required: [range, timeSeries, summary]
+    properties:
+      range: { $ref: '#/components/schemas/DashboardBucketedRange' }
+      timeSeries:
+        type: array
+        items: { $ref: '#/components/schemas/DashboardPresenceTrendPoint' }
+      summary:
+        type: object
+        required: [present, late, absent, total, attendanceRate, punctualityRate, peakLabel]
+        properties:
+          present: { type: integer, minimum: 0, examples: [2] }
+          late: { type: integer, minimum: 0, examples: [1] }
+          absent: { type: integer, minimum: 0, examples: [1] }
+          total: { type: integer, minimum: 0, examples: [4] }
+          attendanceRate: { type: number, examples: [75] }
+          punctualityRate: { type: number, examples: [66.67] }
+          peakLabel:
+            type: [string, 'null']
+            description: Label of the busiest bucket, or null when the window has no buckets at all.
+            examples: ['2026-03-10']
+
+  DashboardPresenceSegment:
+    description: |
+      One slice of a presence breakdown. The `event` and `location` dimensions
+      add the status split and an attendance rate per row, because a busy event
+      that nobody actually turns up to is the case those cuts exist to expose.
+      The `status` and `eventType` dimensions return the base fields only.
+    allOf:
+      - $ref: '#/components/schemas/DashboardSegment'
+      - type: object
+        properties:
+          key:
+            description: |
+              A status name, `recurring` or `nonRecurring`, or the numeric id of
+              the event or location depending on the requested dimension.
+            type: [string, integer]
+          present: { type: integer, minimum: 0 }
+          late: { type: integer, minimum: 0 }
+          absent: { type: integer, minimum: 0 }
+          attendanceRate: { type: number }
+
+  DashboardPresenceBreakdown:
+    type: object
+    description: A single categorical cut of attendance, sized for a donut or ranked bar.
+    required: [by, range, segments]
+    properties:
+      by:
+        type: string
+        description: The dimension actually used, which is not always the one requested.
+        enum: [status, eventType, event, location]
+        examples: [status]
+      range: { $ref: '#/components/schemas/DashboardRange' }
+      segments:
+        type: array
+        items: { $ref: '#/components/schemas/DashboardPresenceSegment' }
+
+  DashboardPunctualityPoint:
+    type: object
+    description: |
+      One bucket of the on-time story. Only rows that produced a check-in count
+      toward `onTime` and `late`; a no-show has no arrival time and so has no
+      punctuality.
+    required: [label, onTime, late, onTimeRate, avgLateness]
+    properties:
+      label: { type: string, examples: ['2026-03-10'] }
+      onTime: { type: integer, minimum: 0, examples: [1] }
+      late: { type: integer, minimum: 0, examples: [1] }
+      onTimeRate: { type: number, examples: [50] }
+      avgLateness:
+        type: number
+        description: |
+          Mean minutes past the scheduled open across every check-in in the
+          bucket, floored at zero per row and rounded to one decimal.
+        examples: [5]
+
+  DashboardPunctualityTrend:
+    type: object
+    description: |
+      On-time versus late over time. This is the axis a plain attendance chart
+      cannot show: turnout can be flat while arrivals drift steadily later.
+    required: [range, timeSeries]
+    properties:
+      range: { $ref: '#/components/schemas/DashboardBucketedRange' }
+      timeSeries:
+        type: array
+        items: { $ref: '#/components/schemas/DashboardPunctualityPoint' }
+
+  DashboardLatenessDistribution:
+    type: object
+    description: |
+      How late people actually are, binned. Answers whether a punctuality
+      problem is a crowd arriving a couple of minutes behind or a tail turning
+      up an hour in, which the mean alone flattens into one indistinguishable
+      number.
+    required: [range, total, segments]
+    properties:
+      range: { $ref: '#/components/schemas/DashboardRange' }
+      total:
+        type: integer
+        minimum: 0
+        description: Check-ins measured. Rows with no check-in are not in the distribution at all.
+        examples: [4]
+      segments:
+        type: array
+        minItems: 6
+        maxItems: 6
+        description: |
+          Always the same six bins in the same order, even at zero:
+          `on_time`, `m0_5`, `m5_15`, `m15_30`, `m30_60`, `m60p`.
+        items: { $ref: '#/components/schemas/DashboardSegment' }
+
+  DashboardHeatmapCell:
+    type: object
+    description: One day-of-week and hour-of-day cell with at least one arrival.
+    required: [dow, hour, count]
+    properties:
+      dow:
+        type: integer
+        minimum: 0
+        maximum: 6
+        description: Venue day of week, 0 for Sunday through 6 for Saturday.
+        examples: [2]
+      hour:
+        type: integer
+        minimum: 0
+        maximum: 23
+        description: Venue hour of day.
+        examples: [12]
+      count: { type: integer, minimum: 1, examples: [3] }
+
+  DashboardArrivalHeatmap:
+    type: object
+    description: |
+      When arrivals actually happen, as a day-of-week by hour grid. Reveals the
+      shape of a schedule that no single line chart shows, for example a
+      Monday-morning session everyone drifts into an hour after it opens.
+    required: [range, cells, maxCount, total]
+    properties:
+      range: { $ref: '#/components/schemas/DashboardRange' }
+      cells:
+        type: array
+        description: |
+          Only non-empty cells, so a mostly quiet week is a handful of entries
+          rather than 168. The client fills the rest of the grid with zero.
+        items: { $ref: '#/components/schemas/DashboardHeatmapCell' }
+      maxCount:
+        type: integer
+        minimum: 0
+        description: Busiest cell's count, supplied so the colour scale is computed once, server-side.
+        examples: [3]
+      total: { type: integer, minimum: 0, examples: [4] }
+
+  DashboardAnomalyPoint:
+    type: object
+    description: |
+      One bucket of anomaly volume, pre-split by type so the chart can stack
+      without a second pass over the data.
+    required: [label, total, duplicateDescriptor, livenessFailed, replaySuspected, rapidAttempts]
+    properties:
+      label: { type: string, examples: ['2026-03-10'] }
+      total: { type: integer, minimum: 0, examples: [2] }
+      duplicateDescriptor:
+        type: integer
+        minimum: 0
+        description: A captured face matched an enrolled template belonging to someone else.
+        examples: [0]
+      livenessFailed:
+        type: integer
+        minimum: 0
+        description: The capture did not pass the server-side liveness check, so it may not be a live person.
+        examples: [1]
+      replaySuspected:
+        type: integer
+        minimum: 0
+        description: The capture looked like previously seen material rather than a fresh one.
+        examples: [1]
+      rapidAttempts:
+        type: integer
+        minimum: 0
+        description: Retries arriving faster than a person plausibly produces them.
+        examples: [0]
+
+  DashboardAnomalyTrend:
+    type: object
+    description: |
+      Anomaly volume over time, zero-filled across every bucket. A rising line
+      here is the early warning that someone is probing the check-in flow.
+    required: [range, timeSeries]
+    properties:
+      range: { $ref: '#/components/schemas/DashboardBucketedRange' }
+      timeSeries:
+        type: array
+        items: { $ref: '#/components/schemas/DashboardAnomalyPoint' }
+
+  DashboardAnomalySegment:
+    description: |
+      One anomaly category with how much of it has been dealt with. `resolved`
+      is a subset of `count`, so the gap between them is the review backlog for
+      that category.
+    allOf:
+      - $ref: '#/components/schemas/DashboardSegment'
+      - type: object
+        required: [resolved]
+        properties:
+          resolved: { type: integer, minimum: 0, examples: [1] }
+
+  DashboardAnomalyBreakdown:
+    type: object
+    description: Anomalies cut by kind or by seriousness, with resolution progress per slice.
+    required: [by, range, total, segments]
+    properties:
+      by:
+        type: string
+        description: The dimension actually used.
+        enum: [type, severity]
+        examples: [type]
+      range: { $ref: '#/components/schemas/DashboardRange' }
+      total: { type: integer, minimum: 0, examples: [2] }
+      segments:
+        type: array
+        description: |
+          Every category in the catalog, always in the same order, even at
+          zero: the four anomaly types, or LOW, MEDIUM, and HIGH.
+        items: { $ref: '#/components/schemas/DashboardAnomalySegment' }
+
+  DashboardLivenessHistogram:
+    type: object
+    description: A measured distribution with its own mean and fixed bins.
+    required: [count, average, bins]
+    properties:
+      count:
+        type: integer
+        minimum: 0
+        description: Evidence records that carried this measurement. Can be zero after retention purges.
+        examples: [1]
+      average:
+        type: number
+        description: Mean across those records, to two decimal places.
+        examples: [0.3]
+      bins:
+        type: array
+        items: { $ref: '#/components/schemas/DashboardHistogramBin' }
+
+  DashboardLivenessQuality:
+    type: object
+    description: |
+      How confidently the biometric check is actually deciding, drawn from
+      retained capture evidence. Two distributions, and they answer different
+      questions.
+
+      `livenessScore` runs 0 to 1 and is the server's confidence that it saw a
+      live person rather than a photo or a screen: higher is better, and a mass
+      piling up at the low end means captures are being rejected on quality,
+      not fraud.
+
+      `matchDistance` is the distance between the captured face and the
+      enrolled template: **lower is better**, and 0.6 is the threshold at which
+      a match is accepted. A cluster sitting just under the threshold is the
+      warning sign that enrollments have gone stale and are about to start
+      failing.
+
+      Evidence is retained only briefly by design, so a long window can return
+      fewer records than it has check-ins. That is a privacy property, not a
+      gap in the data.
+    required: [range, livenessScore, matchDistance]
+    properties:
+      range: { $ref: '#/components/schemas/DashboardRange' }
+      livenessScore:
+        description: 'Five fixed bins across 0 to 1: 0.0-0.2 through 0.8-1.0.'
+        allOf: [{ $ref: '#/components/schemas/DashboardLivenessHistogram' }]
+      matchDistance:
+        description: 'Five fixed bins: 0.0-0.3, 0.3-0.45, 0.45-0.6, 0.6-0.8, and 0.8+.'
+        allOf:
+          - $ref: '#/components/schemas/DashboardLivenessHistogram'
+          - type: object
+            required: [threshold]
+            properties:
+              threshold:
+                type: number
+                description: The accept cutoff, so the chart can draw the line rather than hard-code it.
+                examples: [0.6]
+
+  DashboardIntegrityComponent:
+    type: object
+    description: |
+      One input to the composite score, published with its own weight so the
+      UI can show exactly how the headline number was reached instead of
+      presenting it as an oracle.
+    required: [key, label, value, weight]
+    properties:
+      key:
+        type: string
+        enum: [cleanliness, resolution, liveness]
+        examples: [cleanliness]
+      label: { type: string, examples: [Clean check-ins] }
+      value: { type: number, minimum: 0, maximum: 100, examples: [60] }
+      weight: { type: number, examples: [0.55] }
+
+  DashboardIntegritySummary:
+    type: object
+    description: |
+      The integrity picture in one payload: a composite score with its working
+      shown, the underlying totals, and the anomaly catalog counts.
+    required: [range, integrityScore, summary, byType, bySeverity]
+    properties:
+      range: { $ref: '#/components/schemas/DashboardRange' }
+      integrityScore:
+        type: object
+        description: |
+          A 0 to 100 blend of clean check-ins (weight 0.55), anomaly resolution
+          (0.15), and liveness quality (0.30).
+
+          A component with nothing to say is dropped and the remaining weights
+          are renormalized, so a deployment holding no retained evidence is not
+          scored down for a dimension it has no data on. That is why `components`
+          may contain two entries rather than three.
+        required: [score, grade, components]
+        properties:
+          score: { type: integer, minimum: 0, maximum: 100, examples: [100] }
+          grade:
+            type: string
+            description: '90+ is A, 80+ B, 70+ C, 60+ D, below that F.'
+            enum: [A, B, C, D, F]
+            examples: [A]
+          components:
+            type: array
+            minItems: 2
+            maxItems: 3
+            items: { $ref: '#/components/schemas/DashboardIntegrityComponent' }
+      summary:
+        type: object
+        required:
+          [totalAnomalies, openAnomalies, resolvedAnomalies, resolutionRate, mttrHours,
+           successfulCheckins, attempts, anomalyRate, avgLivenessScore, evidenceCount]
+        properties:
+          totalAnomalies: { type: integer, minimum: 0, examples: [2] }
+          openAnomalies:
+            type: integer
+            minimum: 0
+            description: Unresolved flags across all time, not just this window, because a backlog does not expire.
+            examples: [1]
+          resolvedAnomalies: { type: integer, minimum: 0, examples: [1] }
+          resolutionRate: { type: number, examples: [50] }
+          mttrHours:
+            type: number
+            description: |
+              Mean hours from a flag being raised to being resolved, across the
+              resolved ones only. Unresolved flags are excluded rather than
+              counted as infinite, so the figure measures review speed and not
+              backlog size.
+            examples: [2]
+          successfulCheckins:
+            type: integer
+            minimum: 0
+            description: Check-ins that went through in the window, present plus late. No-shows are excluded.
+            examples: [3]
+          attempts:
+            type: integer
+            minimum: 0
+            description: Successful check-ins plus flags raised, the denominator for `anomalyRate`.
+            examples: [5]
+          anomalyRate: { type: number, examples: [40] }
+          avgLivenessScore: { type: number, examples: [0.3] }
+          evidenceCount: { type: integer, minimum: 0, examples: [1] }
+      byType:
+        type: array
+        description: All four anomaly types, always present, zero-filled.
+        items: { $ref: '#/components/schemas/DashboardLabelledCount' }
+      bySeverity:
+        type: array
+        description: LOW, MEDIUM, and HIGH, always present, zero-filled.
+        items: { $ref: '#/components/schemas/DashboardLabelledCount' }
+
+  DashboardLeaderboardEntry:
+    type: object
+    description: |
+      One attendant on the turnout leaderboard. Ranked by how often they
+      actually showed up, breaking ties in favour of whoever was on time more
+      often, so consistency beats mere volume.
+    required: [rank, userId, name, email, profilePicture, attended, present, late, absent, total, attendanceRate, onTimeRate]
+    properties:
+      rank: { type: integer, minimum: 1, examples: [1] }
+      userId: { type: integer, examples: [12] }
+      name:
+        type: string
+        description: |
+          First and last name joined. Reads `Unknown attendee` when the account
+          has since been removed but their attendance history survives, which
+          is deliberate: deleting a person must not silently rewrite the record
+          of who was in the room.
+        examples: [Amina Yakubu]
+      email: { type: [string, 'null'], format: email, examples: [amina@example.com] }
+      profilePicture: { type: [string, 'null'], format: uri }
+      attended: { type: integer, minimum: 0, description: Present plus late., examples: [2] }
+      present: { type: integer, minimum: 0, examples: [2] }
+      late: { type: integer, minimum: 0, examples: [0] }
+      absent: { type: integer, minimum: 0, examples: [0] }
+      total: { type: integer, minimum: 0, examples: [2] }
+      attendanceRate: { type: number, examples: [100] }
+      onTimeRate: { type: number, examples: [100] }
+
+  DashboardTopAttendees:
+    type: object
+    description: The turnout leaderboard for the window.
+    required: [range, leaderboard]
+    properties:
+      range: { $ref: '#/components/schemas/DashboardRange' }
+      leaderboard:
+        type: array
+        maxItems: 50
+        items: { $ref: '#/components/schemas/DashboardLeaderboardEntry' }
+
+  DashboardRetentionOccurrence:
+    type: object
+    description: |
+      One occurrence of the recurring event, measured against the founding
+      cohort rather than against the previous occurrence.
+    required: [occurrence, date, totalAttendees, cohortRetained, retentionRate]
+    properties:
+      occurrence:
+        type: integer
+        minimum: 1
+        description: 1-based position in the event's session order.
+        examples: [2]
+      date: { type: string, format: date, examples: ['2026-03-11'] }
+      totalAttendees:
+        type: integer
+        minimum: 0
+        description: Everyone who turned up, including newcomers who were not in the cohort.
+        examples: [1]
+      cohortRetained:
+        type: integer
+        minimum: 0
+        description: How many of the original cohort came back for this one.
+        examples: [1]
+      retentionRate:
+        type: number
+        description: |
+          `cohortRetained` as a share of `cohortSize`. Occurrence 1 is 100 by
+          definition, since it is the cohort measuring itself.
+        examples: [50]
+
+  DashboardRetentionCurve:
+    type: object
+    description: |
+      Whether a recurring event holds on to the crowd it started with. The
+      cohort is everyone who attended the first occurrence; each later
+      occurrence reports how many of them returned.
+
+      Measuring against the founding cohort rather than the previous occurrence
+      is the deliberate choice: a curve that decays and then recovers means the
+      same people drifted back, whereas week-on-week ratios would hide a total
+      turnover behind a flat line.
+    required: [event, cohortSize, availableEvents, occurrences]
+    properties:
+      event:
+        description: |
+          The event the curve was drawn for. Null only when the deployment has
+          no recurring events at all, in which case `occurrences` is empty too.
+        oneOf:
+          - $ref: '#/components/schemas/DashboardEventRef'
+          - type: 'null'
+      cohortSize:
+        type: integer
+        minimum: 0
+        description: Distinct attendees at the first occurrence, the denominator for every rate below.
+        examples: [2]
+      availableEvents:
+        type: array
+        maxItems: 50
+        description: |
+          Recurring events to choose from, newest first. Always returned, so
+          the selector is populated by the same call that draws the chart.
+        items: { $ref: '#/components/schemas/DashboardEventRef' }
+      occurrences:
+        type: array
+        maxItems: 52
+        description: |
+          In session order, capped at 52. A year of weekly occurrences is
+          already more curve than anyone reads, and the cap keeps the query
+          bounded on a long-running event.
+        items: { $ref: '#/components/schemas/DashboardRetentionOccurrence' }
+
+  DashboardAiSummaryRequest:
+    type: object
+    description: |
+      The window to narrate. This is the one analytics endpoint that takes its
+      range in the body rather than the query string, because it is a POST: the
+      call is a generation request with a cost and a side effect at the
+      provider, not a cacheable read, and modelling it as a GET would invite
+      clients to retry it on navigation.
+
+      Every field is optional and an empty body is accepted, in which case the
+      default window applies.
+    properties:
+      preset:
+        type: string
+        description: |
+          One of `today`, `yesterday`, `this_week`, `last_7_days`,
+          `this_month`, `last_month`, `last_30_days`, `this_quarter`,
+          `last_quarter`, `this_year`, `last_year`, `last_90_days`. Ignored
+          when an explicit pair is supplied. Defaults to `this_month`.
+        examples: [last_30_days]
+      startDate:
+        type: string
+        format: date
+        description: '`YYYY-MM-DD`. Must be sent together with `endDate`.'
+        examples: ['2026-03-10']
+      endDate:
+        type: string
+        format: date
+        description: '`YYYY-MM-DD`. Must be sent together with `startDate`.'
+        examples: ['2026-03-11']
+
+  DashboardAiSummary:
+    type: object
+    description: |
+      The generated narrative, or a declaration that no provider is wired up.
+      Check `configured` first: when it is false this is the entire payload and
+      every other field is absent.
+    required: [configured]
+    properties:
+      configured:
+        type: boolean
+        description: |
+          Whether an AI provider key is set on this deployment. False is a
+          normal, successful 200 rather than an error, so a deployment that
+          never wanted the feature renders a quiet empty state instead of a
+          broken card the operator has to explain away.
+        examples: [true]
+      summary:
+        type: string
+        description: |
+          Plain text, not markup: a headline line, then three to five bullets
+          beginning with `- `, then two or three recommendations in the same
+          form. Present only when `configured` is true.
+      model:
+        type: string
+        description: Which model produced the text, so a change in tone can be traced to a model change.
+        examples: [gemini-2.0-flash]
+      generatedAt: { type: string, format: date-time }
+      stats:
+        type: object
+        description: |
+          The exact aggregate snapshot the model was given, returned so the
+          narrative can be audited against the numbers it was supposedly based
+          on. It is assembled only from aggregate slices and contains no
+          attendee names, emails, or per-person rows: the leaderboard is never
+          consulted. That PII firewall is a property of how this payload is
+          built, not a filter applied afterwards.
+        properties:
+          period: { $ref: '#/components/schemas/DashboardDayWindow' }
+          kpis:
+            type: object
+            description: The admin KPI row trimmed to value, unit, and trend per metric.
+            additionalProperties: true
+          integrity:
+            type: object
+            description: The integrity score, its grade, and the integrity summary totals.
+            additionalProperties: true
+          statusBreakdown:
+            type: array
+            items: { $ref: '#/components/schemas/DashboardSegment' }
+          eventTypeBreakdown:
+            type: array
+            items: { $ref: '#/components/schemas/DashboardSegment' }
+          anomaliesByType:
+            type: array
+            items: { $ref: '#/components/schemas/DashboardLabelledCount' }
+          anomaliesBySeverity:
+            type: array
+            items: { $ref: '#/components/schemas/DashboardLabelledCount' }

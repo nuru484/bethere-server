@@ -1,0 +1,472 @@
+# Cross-device "scan from phone" hand-off.
+#
+# A user signed in on a laptop with no usable camera cannot pass the live face
+# check on that device. Pairing lets them finish it on the phone they already
+# have in their pocket: the laptop starts a pairing, renders the returned
+# hand-off token as a QR deep-link, and the phone opens that link and performs
+# the capture. The laptop polls the pairing row to learn when the phone is done.
+#
+# Nothing here mints a session for the phone. The phone carries only the
+# hand-off token, which is bound to one user, one pairing, one scope and, for
+# attendance, one event and one direction. That is why the capture schemas below
+# never accept an `eventId` or a `mode`: those come from the token, so a phone
+# holding a check-in link cannot talk itself into a check-out, into a different
+# event, or into somebody else's account.
+#
+# The capture and step bodies mirror the attendance and face-scan flows exactly,
+# because the phone endpoints reuse those same services. They are restated here
+# with the pairing prefix rather than shared, so the two surfaces can document
+# their own auth model without one file's changes silently rewriting the other.
+
+parameters:
+  PairingIdPath:
+    name: pairingId
+    in: path
+    required: true
+    description: |
+      The pairing id returned by `POST /api/v1/pairing`. A UUID rather than a
+      sequence number, because it is the value the laptop polls on and a
+      guessable id would let one attendant watch another's hand-off complete.
+    schema:
+      type: string
+      format: uuid
+
+schemas:
+  PairingScope:
+    type: string
+    description: |
+      What the phone is being handed the capture for. `ATTENDANCE` is a check-in
+      or check-out against one event; `ENROLL` is first-time face enrollment.
+      The scope is fixed when the pairing is created and is carried in the
+      hand-off token, so the phone can only ever perform the one it was sent for.
+    enum: [ATTENDANCE, ENROLL]
+
+  PairingMode:
+    type: string
+    description: |
+      The direction of an attendance capture, or the constant `enroll` for an
+      enrollment pairing. Binding the direction into the token is what stops a
+      phone that was handed a check-in link from driving a check-out with it.
+    enum: [in, out, enroll]
+
+  PairingStatus:
+    type: string
+    description: |
+      Lifecycle of the pairing row. `PENDING` means the phone has not finished
+      yet, `COMPLETED` means the capture committed, and `EXPIRED` means the
+      five-minute window lapsed before the phone finished. `EXPIRED` is computed
+      at read time from `expiresAt` rather than written by a background job, so
+      a lapsed pairing reads as expired the instant it lapses.
+    enum: [PENDING, COMPLETED, EXPIRED]
+
+  PairingLivenessAction:
+    type: string
+    description: |
+      One prompted action from the randomized liveness challenge. The client
+      learns the sequence only after the server draws it, which is what a
+      pre-recorded video cannot satisfy.
+    enum: [TURN_LEFT, TURN_RIGHT, BLINK, SMILE]
+
+  PairingStartRequest:
+    type: object
+    description: |
+      What the laptop is asking to hand off. There is no express-validator chain
+      on this endpoint: the body is validated inside the pairing service, so a
+      bad value comes back as a plain 400 with a message and no per-field
+      `details.errors` block.
+    required: [scope]
+    properties:
+      scope:
+        $ref: '#/components/schemas/PairingScope'
+      eventId:
+        type: [integer, 'null']
+        minimum: 1
+        description: |
+          Required when `scope` is `ATTENDANCE`, and rejected as missing if it is
+          not an integer. Sent as a string by a form-encoded client is fine, the
+          controller parses it. Ignored entirely for `ENROLL`, which is not tied
+          to an event, and stored as null there.
+        examples: [7]
+      mode:
+        type: string
+        description: |
+          Only meaningful for `ATTENDANCE`. Anything other than the exact string
+          `out` is treated as `in`, so a typo checks the user in rather than
+          silently doing nothing. For `ENROLL` the stored mode is always
+          `enroll`, whatever is sent.
+        enum: [in, out]
+        default: in
+        examples: [in]
+
+  PairingStartResponse:
+    type: object
+    description: |
+      The material the laptop needs to render the QR code. The token is the
+      credential the phone will present, so the laptop should put it in a
+      deep-link and display it, never persist it.
+    required: [message, data]
+    properties:
+      message:
+        type: string
+        examples: [Scan the code with your phone to continue there.]
+      data:
+        type: object
+        required: [pairingId, handoffToken, expiresAt]
+        properties:
+          pairingId:
+            type: string
+            format: uuid
+            description: Poll `GET /api/v1/pairing/{pairingId}` with this to learn when the phone finishes.
+            examples: [8f2b1a44-6d0e-4c8f-9a71-0d3c5e9b21aa]
+          handoffToken:
+            type: string
+            description: |
+              The signed, purpose-tagged bearer token the phone sends as
+              `Authorization: Bearer <token>`. It carries the user, the pairing
+              id, the scope and, for attendance, the event and direction, and it
+              is honored only on `/api/v1/pairing/session/*`. It is not a session
+              and cannot be exchanged for one.
+            examples: [eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9...]
+          expiresAt:
+            type: string
+            format: date-time
+            description: |
+              Five minutes from issue. Long enough to unlock a phone, open the
+              link, scan the venue code and perform the prompted actions, short
+              enough that a token photographed off somebody's screen is dead
+              before it is useful.
+
+  PairingStatusResponse:
+    type: object
+    description: |
+      The laptop's poll. Deliberately thin: it says whether the phone finished,
+      not what it captured, so the polling loop never becomes a second way to
+      read attendance or biometric state.
+    required: [message, data]
+    properties:
+      message: { type: string, examples: [Pairing status.] }
+      data:
+        type: object
+        required: [status, scope]
+        properties:
+          status: { $ref: '#/components/schemas/PairingStatus' }
+          scope: { $ref: '#/components/schemas/PairingScope' }
+          completedAt:
+            type: [string, 'null']
+            format: date-time
+            description: When the phone's capture committed. Null until then, and null for an expired pairing.
+
+  PairingContextResponse:
+    type: object
+    description: |
+      What the phone is authorized to do, read back from its own token. The
+      phone calls this first so it can render the right flow, a check-in, a
+      check-out, or an enrollment, without being told by the QR payload it just
+      scanned, which a user could have tampered with.
+    required: [message, data]
+    properties:
+      message: { type: string, examples: [Pairing context.] }
+      data:
+        type: object
+        required: [scope, mode]
+        properties:
+          scope: { $ref: '#/components/schemas/PairingScope' }
+          eventId:
+            type: [integer, 'null']
+            description: The event this hand-off is bound to, or null for an enrollment pairing.
+            examples: [7]
+          mode: { $ref: '#/components/schemas/PairingMode' }
+
+  PairingChallengeRequest:
+    type: object
+    description: |
+      The batch challenge request. It carries only the venue code, because
+      everything else that would identify the capture, the event and the
+      direction, is taken from the hand-off token. Send an empty object for an
+      enrollment pairing.
+    properties:
+      venueCode:
+        type: string
+        description: |
+          The rotating code displayed at the venue, as scanned by the phone.
+          Required for `ATTENDANCE`, ignored for `ENROLL`. Codes rotate every 30
+          seconds and are checked here with a tight tolerance, because this is
+          the moment the code is scanned.
+        examples: ['482913']
+
+  PairingChallengeResponse:
+    type: object
+    description: |
+      A single-use batch challenge. The phone prompts all of the actions locally,
+      one after another, then uploads one burst proving every one of them in
+      order to `POST /api/v1/pairing/session/capture`.
+    required: [message, data]
+    properties:
+      message:
+        type: string
+        examples: [Liveness challenge issued. Follow the on-screen actions.]
+      data:
+        type: object
+        required: [actions, challengeToken, expiresAt]
+        properties:
+          actions:
+            type: array
+            description: |
+              The actions to prove, in this exact order. Three distinct actions
+              drawn with a CSPRNG per challenge.
+            items: { $ref: '#/components/schemas/PairingLivenessAction' }
+            examples:
+              - [BLINK, TURN_RIGHT, SMILE]
+          challengeToken:
+            type: string
+            description: |
+              Return this with the frames. It is single use and its purpose tag
+              is distinct from a step challenge, so it cannot be replayed into
+              the step endpoint or reused for a second capture.
+          expiresAt:
+            type: string
+            format: date-time
+            description: |
+              60 seconds from issue. The venue-code acceptance window at upload
+              is derived from this lifetime, so a longer challenge would widen
+              the window in which a photographed code stays usable.
+
+  PairingStepChallengeResponse:
+    type: object
+    description: |
+      A step-by-step challenge. The same randomized action draw as the batch
+      flow, but the phone proves one action per upload and the server verifies
+      each before the next is prompted, which is what gives the user a retry on a
+      single missed action instead of restarting the whole scan.
+    required: [message, data]
+    properties:
+      message:
+        type: string
+        examples: [Step-by-step scan started. Perform the first action.]
+      data:
+        type: object
+        required: [actions, challengeToken, currentStep, nextAction, totalSteps, expiresAt]
+        properties:
+          actions:
+            type: array
+            items: { $ref: '#/components/schemas/PairingLivenessAction' }
+          challengeToken:
+            type: string
+            description: |
+              Returned with every step of this scan. Carries a step-specific
+              purpose tag, so it cannot be presented to the batch capture
+              endpoint.
+          currentStep:
+            type: integer
+            minimum: 0
+            description: Zero-based index of the action being proven next. Always 0 here.
+            examples: [0]
+          nextAction: { $ref: '#/components/schemas/PairingLivenessAction' }
+          totalSteps:
+            type: integer
+            description: How many uploads this scan will take.
+            examples: [3]
+          expiresAt:
+            type: string
+            format: date-time
+            description: |
+              Five minutes from issue, wider than a batch challenge because the
+              flow spans several verified round-trips. Presence is re-proven at
+              the final step, and the challenge is single use, so the wider
+              window does not let a venue code be relayed and reused.
+
+  PairingCaptureUpload:
+    type: object
+    description: |
+      The batch capture body, `multipart/form-data`. One burst of frames proving
+      every challenged action in order. Note what is absent: no event, no
+      direction, no user. All three come from the hand-off token, so the phone
+      cannot redirect the capture by editing the form.
+    required: [frames, challengeToken]
+    properties:
+      frames:
+        type: array
+        description: |
+          Between 6 and 16 image frames, all in the repeated field `frames`.
+          A count outside that range is a 400 and does not consume the pairing,
+          so the phone can simply re-capture. Each frame is capped at 1.5 MB:
+          client-compressed JPEGs are tiny, and the cap is what stops a single
+          check-in buffering tens of megabytes in memory. JPEG, PNG, WEBP, HEIC
+          and HEIF are accepted, and the declared mimetype is only the first
+          gate, the leading bytes of every frame are checked against the real
+          image signatures.
+        minItems: 6
+        maxItems: 16
+        items:
+          type: string
+          format: binary
+      challengeToken:
+        type: string
+        description: The token from `POST /api/v1/pairing/session/challenge`. Consumed here.
+      venueCode:
+        type: string
+        description: |
+          Required for an `ATTENDANCE` pairing. Presence is re-proven at upload,
+          not only when the challenge was minted, so a code photographed and
+          relayed off-site cannot produce a record.
+        examples: ['482913']
+      consent:
+        type: string
+        description: |
+          Required for an `ENROLL` pairing, as the literal string `true`.
+          Multipart fields arrive as strings, and anything else is read as
+          consent withheld, which refuses the enrollment. Ignored for attendance.
+        enum: ['true', 'false']
+        examples: ['true']
+
+  PairingStepUpload:
+    type: object
+    description: |
+      One step of the step-by-step flow, `multipart/form-data`. A dense burst
+      capturing a single prompted action.
+    required: [frames, challengeToken]
+    properties:
+      frames:
+        type: array
+        description: |
+          Between 4 and 20 image frames for this one action. Fewer than a batch
+          burst, because it proves one action rather than three, but sampled fast
+          enough to catch a blink of roughly 200 ms. Same 1.5 MB per-frame cap
+          and same magic-number check as the batch flow.
+        minItems: 4
+        maxItems: 20
+        items:
+          type: string
+          format: binary
+      challengeToken:
+        type: string
+        description: |
+          The step token from `POST /api/v1/pairing/session/step-challenge`. Sent
+          unchanged on every step; the server tracks progress in the challenge
+          row, not in the token.
+      venueCode:
+        type: string
+        description: |
+          For an `ATTENDANCE` pairing, send it on every step. It is only verified
+          on the final step, where the record actually commits, which is what
+          anchors proof of presence to the moment of the write.
+        examples: ['482913']
+      consent:
+        type: string
+        description: |
+          Required on the first step of an `ENROLL` pairing, as the literal
+          string `true`. Ignored for attendance.
+        enum: ['true', 'false']
+        examples: ['true']
+
+  PairingAttendanceRecord:
+    type: object
+    description: |
+      The attendance row the capture committed, identical to what the direct
+      check-in and check-out endpoints return, including the joined session,
+      event, and a trimmed user. Reproduced here rather than summarized, because
+      the phone shows the user the result and the laptop should not have to
+      re-fetch it.
+    required: [id, status, userId, sessionId]
+    properties:
+      id: { type: integer, examples: [1420] }
+      status:
+        type: string
+        description: |
+          `PRESENT` or `LATE`, decided from the session's start time at the
+          moment of the check-in write.
+        examples: [PRESENT]
+      userId: { type: integer, examples: [12] }
+      sessionId: { type: integer, examples: [88] }
+      checkInTime:
+        type: [string, 'null']
+        format: date-time
+      checkOutTime:
+        type: [string, 'null']
+        format: date-time
+        description: Set by a check-out capture, null after a check-in.
+      autoCheckedOut:
+        type: boolean
+        description: |
+          False for anything produced here. It marks a check-out stamped by the
+          session finalizer rather than proven by a face check.
+      createdAt: { type: string, format: date-time }
+      updatedAt: { type: string, format: date-time }
+
+  PairingCaptureResponse:
+    type: object
+    description: |
+      The capture committed and the pairing has been flipped to `COMPLETED`, so
+      the laptop's next poll sees it. The payload depends on the token's scope:
+      an attendance pairing returns the attendance row, an enrollment pairing
+      returns the refreshed account with `hasFaceScan` now true.
+
+      Marking the pairing complete is best effort. The capture is already
+      committed at that point, so a lost race on the status flip must not fail
+      the user's check-in.
+    required: [message, data]
+    properties:
+      message:
+        type: string
+        examples: [All done. You can return to your laptop.]
+      data:
+        type: object
+        required: [done]
+        properties:
+          done:
+            type: boolean
+            const: true
+          attendance:
+            $ref: '#/components/schemas/PairingAttendanceRecord'
+          user:
+            $ref: '#/components/schemas/AttendantAccount'
+
+  PairingStepPending:
+    type: object
+    description: |
+      The action was verified and the scan continues. Nothing has been written
+      yet: no attendance row, no face template.
+    required: [done, currentStep, nextAction, totalSteps]
+    properties:
+      done:
+        type: boolean
+        const: false
+      currentStep:
+        type: integer
+        minimum: 1
+        description: Zero-based index of the action to prove next.
+        examples: [1]
+      nextAction: { $ref: '#/components/schemas/PairingLivenessAction' }
+      totalSteps: { type: integer, examples: [3] }
+
+  PairingStepComplete:
+    type: object
+    description: |
+      The final action passed and the record committed. The pairing is flipped to
+      `COMPLETED` on this response only, which is the signal the laptop's poll is
+      waiting for.
+    required: [done]
+    properties:
+      done:
+        type: boolean
+        const: true
+      attendance:
+        $ref: '#/components/schemas/PairingAttendanceRecord'
+      user:
+        $ref: '#/components/schemas/AttendantAccount'
+
+  PairingStepResponse:
+    type: object
+    description: |
+      One verified step. Branch on `data.done`: false means prompt
+      `data.nextAction` and upload again, true means the scan is finished and the
+      user can go back to their laptop.
+    required: [message, data]
+    properties:
+      message:
+        type: string
+        examples: [Action verified. Perform the next action.]
+      data:
+        oneOf:
+          - $ref: '#/components/schemas/PairingStepPending'
+          - $ref: '#/components/schemas/PairingStepComplete'

@@ -1,0 +1,147 @@
+# Root of the OpenAPI document.
+#
+# This file holds only the document-level keys. `paths` and `components` are
+# assembled from docs/openapi/paths/*.yaml and docs/openapi/components/*.yaml
+# by src/docs/openapi.js, so every $ref in this spec is an internal one
+# (#/components/...) and the served document needs no external resolution.
+openapi: 3.1.0
+
+info:
+  title: BeThere API
+  version: 1.0.0
+  summary: Attendance you can't fake.
+  description: |
+    BeThere verifies that a person was physically present at an event. Marking
+    attendance requires two independent proofs in one flow: the venue's
+    rotating on-site code, which only someone at the location can read, and a
+    live face check against an enrolled descriptor, which only the person
+    themselves can pass. Both are verified on the server, so neither can be
+    forged by a modified client.
+
+    This document covers every HTTP endpoint the service exposes.
+
+    ## Authentication
+
+    Sessions are httpOnly cookies, not bearer tokens. A successful login sets
+    `bethere_accessToken` (30 minutes) and `bethere_refreshToken` (7 days), and
+    no token is ever returned in a response body. Because the cookies are
+    httpOnly, JavaScript cannot read or set them, which removes the usual
+    XSS token-theft path.
+
+    **To try the API from this page:** call `POST /api/v1/auth/demo-login` with
+    a role of `ADMIN` or `USER`. The browser stores the session cookie and
+    every other endpoint on this page becomes authenticated. There is no token
+    to paste into the Authorize dialog, and none is needed.
+
+    Access tokens carry a `tokenVersion` claim that is re-checked against the
+    live value on every request, so revoking a session takes effect
+    immediately rather than at token expiry.
+
+    The `/api/v1/pairing/session/*` endpoints are the one exception. They are
+    called by a phone that has scanned a pairing QR code and has no session of
+    its own, so they authenticate with a short-lived hand-off token sent as
+    `Authorization: Bearer <token>`.
+
+    ## Response envelope
+
+    Successful responses are `{ "message": string, "data": ... }`. List
+    endpoints add `"meta"` with pagination counts. A few action endpoints
+    return only a `message`.
+
+    Errors are uniform and come from a single handler:
+
+    ```json
+    {
+      "status": "error",
+      "message": "Validation Error",
+      "requestId": "3f1c9d2e-...",
+      "code": "VALIDATION_ERROR",
+      "details": { "errors": [{ "field": "email", "message": "Invalid email format" }] }
+    }
+    ```
+
+    `requestId` is always present and is echoed in the `X-Request-Id` response
+    header, so a user-reported failure can be traced to the exact log line.
+    `code` is a stable machine-readable identifier that clients may branch on.
+    `details` is returned in production only for validation failures; other
+    errors expose it in non-production environments only, and a production 500
+    has its message replaced with `Internal Server Error`.
+
+    ## Rate limits
+
+    Credential endpoints (login, OTP, password reset) are rate limited and
+    **fail closed**: if Redis is unreachable they reject rather than allow, so
+    an infrastructure outage cannot become a brute-force window. Exceeding a
+    limit returns 429 with `code: RATE_LIMIT_EXCEEDED`.
+
+    ## Pagination
+
+    List endpoints take `page` (default 1) and `limit` (default 10, maximum
+    100). Both are clamped rather than rejected, so an out-of-range value
+    returns the nearest valid page instead of an error.
+
+  contact:
+    name: Nurudeen Abdul-Majeed
+    url: https://manuru.dev
+    email: abdulmajeednurudeen48@gmail.com
+  license:
+    name: ISC
+    url: https://opensource.org/license/isc-license-txt
+
+externalDocs:
+  description: Source on GitHub
+  url: https://github.com/nuru484/bethere-server
+
+servers:
+  - url: https://api.bethere.manuru.dev
+    description: Production
+  - url: http://localhost:8080
+    description: Local development
+
+# Every operation requires a session cookie unless it overrides this with
+# `security: []` (public) or names the hand-off scheme (phone pairing).
+security:
+  - sessionCookie: []
+
+tags:
+  - name: Health
+    description: Liveness and readiness probes. Unauthenticated, and outside the versioned API.
+  - name: Auth
+    description: |
+      Login, logout, and session lifecycle. Supports password login, one-time
+      code login with no password at all, and optional two-factor.
+  - name: Password reset
+    description: |
+      Emailed, time-limited reset links. Request responses are deliberately
+      identical whether or not the account exists, so the endpoint cannot be
+      used to enumerate registered contacts.
+  - name: Users
+    description: Attendant accounts. Administrators manage the roster; attendants manage their own profile.
+  - name: Admins
+    description: Administrator accounts. Administrator-only throughout.
+  - name: Events
+    description: |
+      Events, their venues, and the rotating on-site codes an attendant scans
+      to prove they are at the location.
+  - name: Attendance
+    description: |
+      Check-in and check-out. The step endpoints drive the guided
+      one-action-at-a-time capture flow; the single-shot endpoints take all
+      liveness frames in one request.
+  - name: Face scan
+    description: |
+      Biometric enrollment. Descriptors are stored encrypted, consent is
+      versioned and recorded, and raw frames are never persisted.
+  - name: Pairing
+    description: |
+      Hand-off from a laptop to a phone, so a user on a device without a usable
+      camera can complete the face check on their phone. The laptop endpoints
+      use the session cookie; the phone endpoints use a scoped hand-off token.
+  - name: Dashboard
+    description: Aggregated analytics. Separate attendant-scoped and administrator-scoped slices.
+  - name: Reports
+    description: Filtered attendance reporting, including a spreadsheet export.
+  - name: Review
+    description: |
+      The integrity trail: audit logs and the anomalies raised by duplicate
+      descriptors, failed liveness, suspected replays, and rapid retries.

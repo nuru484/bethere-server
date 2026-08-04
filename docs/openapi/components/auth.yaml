@@ -1,0 +1,205 @@
+schemas:
+  AccountBase:
+    type: object
+    description: Fields common to both principal types.
+    required: [id, firstName, lastName, email, role, hasPassword, twoFactorEnabled, createdAt, updatedAt]
+    properties:
+      id:
+        type: integer
+        description: |
+          Unique within the principal's own table only. Administrators and
+          attendants have independent id sequences, so an id is only meaningful
+          alongside `role`.
+        examples: [12]
+      firstName: { type: string, maxLength: 255, examples: [Amina] }
+      lastName: { type: string, maxLength: 255, examples: [Yakubu] }
+      email: { type: string, format: email, examples: [amina@example.com] }
+      phone:
+        type: [string, 'null']
+        description: E.164. Unique across the table when present.
+        examples: ['+233201234567']
+      profilePicture:
+        type: [string, 'null']
+        format: uri
+        description: Cloudinary URL, or null if none has been uploaded.
+      twoFactorEnabled: { type: boolean, examples: [false] }
+      role: { $ref: '#/components/schemas/Role' }
+      hasPassword:
+        type: boolean
+        description: |
+          False for attendants created by an administrator who have not yet set
+          a password; they sign in with a one-time code. Clients use this to
+          decide whether the change-password form needs a current-password
+          field.
+        examples: [true]
+      createdAt: { type: string, format: date-time }
+      updatedAt: { type: string, format: date-time }
+
+  AdminAccount:
+    description: An administrator. Never carries biometric fields.
+    allOf:
+      - $ref: '#/components/schemas/AccountBase'
+      - type: object
+        properties:
+          role:
+            type: string
+            const: ADMIN
+
+  AttendantAccount:
+    description: |
+      An attendant. Adds the biometric enrollment state. The descriptor itself
+      is never returned by any endpoint; only whether one exists.
+    allOf:
+      - $ref: '#/components/schemas/AccountBase'
+      - type: object
+        required: [hasFaceScan, phoneVerified]
+        properties:
+          role:
+            type: string
+            const: USER
+          hasFaceScan:
+            type: boolean
+            description: Whether a face template is enrolled for this attendant.
+            examples: [true]
+          phoneVerified:
+            type: boolean
+            description: Set once the phone has confirmed a one-time code.
+          biometricConsentAt:
+            type: [string, 'null']
+            format: date-time
+            description: When biometric consent was recorded. Enrollment is refused without it.
+          biometricConsentVersion:
+            type: [string, 'null']
+            description: |
+              The consent text version agreed to. A policy change bumps this and
+              forces re-consent.
+          faceLastUsedAt:
+            type: [string, 'null']
+            format: date-time
+            description: |
+              Last successful biometric match. Drives retention purging of
+              dormant templates.
+
+  Principal:
+    description: |
+      The signed-in account. Secrets are stripped before serialization: the
+      password hash, both face-descriptor columns, the token version, and the
+      soft-delete marker are never present.
+    oneOf:
+      - $ref: '#/components/schemas/AdminAccount'
+      - $ref: '#/components/schemas/AttendantAccount'
+    discriminator:
+      propertyName: role
+      mapping:
+        ADMIN: '#/components/schemas/AdminAccount'
+        USER: '#/components/schemas/AttendantAccount'
+
+  OtpChannel:
+    type: string
+    description: Where the one-time code was delivered.
+    enum: [email, sms]
+
+  SessionResponse:
+    type: object
+    description: |
+      A completed sign-in. The tokens are not here: they are set as httpOnly
+      cookies on this response and the body carries only the account.
+    required: [message, data]
+    properties:
+      message: { type: string, examples: [Login successful] }
+      data:
+        type: object
+        required: [user]
+        properties:
+          user: { $ref: '#/components/schemas/Principal' }
+
+  TwoFactorRequiredResponse:
+    type: object
+    description: |
+      The password was correct but the account has two-factor enabled. No
+      session cookie is set; a five-minute pending cookie is set instead, and
+      the flow continues at `POST /api/v1/auth/login/2fa`.
+    required: [message, data]
+    properties:
+      message:
+        type: string
+        examples: [Enter the verification code we sent you.]
+      data:
+        type: object
+        required: [twoFactorRequired, channel]
+        properties:
+          twoFactorRequired:
+            type: boolean
+            const: true
+          channel: { $ref: '#/components/schemas/OtpChannel' }
+
+  LoginRequest:
+    type: object
+    required: [email, password]
+    properties:
+      email:
+        type: string
+        format: email
+        description: |
+          Resolved against administrators first, then attendants, so both sign
+          in through this one endpoint.
+        examples: [amina@example.com]
+      password:
+        type: string
+        format: password
+        description: |
+          Never trimmed or escaped, so passwords containing `& < > ' "` compare
+          correctly against the stored hash.
+        examples: [Passw0rd!]
+
+  DemoLoginRequest:
+    type: object
+    required: [role]
+    properties:
+      role:
+        type: string
+        enum: [ADMIN, USER]
+        description: Which seeded demo account to sign in as. The server holds the credentials.
+        examples: [ADMIN]
+
+  OtpRequestBody:
+    type: object
+    required: [identifier]
+    properties:
+      identifier:
+        type: string
+        maxLength: 255
+        description: A phone number or an email address. The server infers which.
+        examples: ['+233201234567']
+
+  OtpVerifyRequest:
+    allOf:
+      - $ref: '#/components/schemas/OtpRequestBody'
+      - type: object
+        required: [code]
+        properties:
+          code: { $ref: '#/components/schemas/SixDigitCode' }
+
+  SixDigitCode:
+    type: string
+    pattern: '^[0-9]{6}$'
+    description: Six digits. Single use, and expires shortly after issue.
+    examples: ['418302']
+
+  TwoFactorCodeRequest:
+    type: object
+    required: [code]
+    properties:
+      code: { $ref: '#/components/schemas/SixDigitCode' }
+
+  ChannelResponse:
+    type: object
+    description: Confirms a code was dispatched, and where to look for it.
+    required: [message, data]
+    properties:
+      message: { type: string }
+      data:
+        type: object
+        required: [channel]
+        properties:
+          channel: { $ref: '#/components/schemas/OtpChannel' }

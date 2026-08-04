@@ -1,0 +1,1057 @@
+/api/v1/attendance/{eventId}/challenge:
+  parameters:
+    - name: eventId
+      in: path
+      required: true
+      description: The event being attended. Must be an integer id of a live, non-deleted event.
+      schema:
+        type: integer
+        minimum: 1
+  post:
+    tags: [Attendance]
+    operationId: createAttendanceChallenge
+    summary: Open a single-shot check-in or check-out attempt
+    description: |
+      Step one of the single-shot flow. **Attendants only** (`USER`); an
+      `ADMIN` session is refused with 403, because an administrator has no
+      enrolled face and no attendance to mark.
+
+      Attendance rests on two independent proofs, and this endpoint establishes
+      the first. The **venue code** proves location: the screen at the venue
+      shows a code that changes every 30 seconds, and only someone who can see
+      that screen can read the current one. The **live face check** proves
+      identity, and that happens at step two. Neither proof is computed by the
+      client; both are verified server-side from a scanned code and raw frames,
+      so a modified app cannot assert a verdict it did not earn.
+
+      This call exists so the expensive half never runs on an attempt that was
+      always going to fail. It is a fail-fast preflight: the venue code, the
+      biometric enrollment, the consent version, the session window, and the
+      current check-in state are all checked here, before a single frame is
+      uploaded or any machine learning is spent. Only if all of that passes
+      does it draw a randomized challenge.
+
+      The challenge is what defeats replay. The server picks three of the four
+      possible actions, without repetition, using a cryptographic random draw,
+      and returns them with a signed single-use token. A recording made in
+      advance cannot satisfy actions that were chosen after it was recorded,
+      and frames are not accepted at all without the token, so there is no way
+      to skip the draw and upload a prepared capture.
+
+      The venue code is checked here with the tight tolerance of one rotation
+      either side of now, because this is the moment the code is actually
+      scanned. Presence is then re-proven at upload with a wider tolerance,
+      which is described on that endpoint.
+
+      Rate limited to 20 attempts per 15 minutes, keyed on the signed-in
+      principal rather than the IP address. A whole venue shares one network
+      address, so an IP-keyed limit would let the first few attendees exhaust
+      the window and lock out everyone else at the event. Hitting the wall also
+      raises a `RAPID_ATTEMPTS` anomaly for review: a genuine attendee never
+      needs 20 tries in 15 minutes.
+    requestBody:
+      required: true
+      content:
+        application/json:
+          schema: { $ref: '#/components/schemas/AttendanceChallengeRequest' }
+    responses:
+      '200':
+        description: |
+          Every precondition holds and a challenge was issued. The client
+          prompts the user through `actions` in order and uploads the resulting
+          burst to `POST /api/v1/attendance/{eventId}` within 60 seconds.
+        headers:
+          X-Request-Id: { $ref: '#/components/headers/XRequestId' }
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/AttendanceChallengeResponse' }
+            example:
+              message: Liveness challenge issued. Follow the on-screen actions.
+              data:
+                actions: [BLINK, TURN_LEFT, SMILE]
+                challengeToken: eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJ1c2VySWQiOjEyfQ.s1gnatur3
+                expiresAt: '2026-08-04T09:31:00.000Z'
+      '400':
+        description: |
+          A precondition failed. `code` is `VALIDATION_ERROR` when the body or
+          the event id was malformed, and `BIOMETRIC_CONSENT_STALE` when the
+          enrolled template was consented to under an older policy version, in
+          which case the attendant must re-enroll under the current notice
+          before they can check in again.
+
+          Otherwise the message names the cause: the venue code was wrong or
+          has rotated past its tolerance, the account has no enrolled face, no
+          session of this event is running today, or the check-in window for
+          today has not opened yet or has already closed.
+        headers:
+          X-Request-Id: { $ref: '#/components/headers/XRequestId' }
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/Error' }
+            example:
+              status: error
+              message: Invalid or expired venue code. Please scan the code shown at the event location.
+              requestId: 3f1c9d2e-5b7a-4c11-9f60-2a8e4d0b7c31
+      '401': { $ref: '#/components/responses/Unauthorized' }
+      '403':
+        description: |
+          The session belongs to an administrator. Only attendants mark
+          attendance.
+        headers:
+          X-Request-Id: { $ref: '#/components/headers/XRequestId' }
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/Error' }
+      '404':
+        description: |
+          No such event, or the account itself no longer exists. With
+          `mode: out` it also means there is nothing to check out of: no
+          check-in was found for the running session.
+        headers:
+          X-Request-Id: { $ref: '#/components/headers/XRequestId' }
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/Error' }
+      '409':
+        description: |
+          The attempt is redundant. With `mode: in` the attendant has already
+          checked in to this session, with `mode: out` they have already
+          checked out. Caught here rather than after a capture, so nobody is
+          asked to blink at their phone only to be told it was pointless.
+        headers:
+          X-Request-Id: { $ref: '#/components/headers/XRequestId' }
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/Error' }
+            example:
+              status: error
+              message: You have already checked in for this session.
+              requestId: 3f1c9d2e-5b7a-4c11-9f60-2a8e4d0b7c31
+      '429': { $ref: '#/components/responses/RateLimited' }
+
+/api/v1/attendance/{eventId}:
+  parameters:
+    - name: eventId
+      in: path
+      required: true
+      description: The event being attended.
+      schema:
+        type: integer
+        minimum: 1
+  post:
+    tags: [Attendance]
+    operationId: checkIn
+    summary: Check in with a single capture
+    description: |
+      Step two of the single-shot flow, and the call that actually records
+      attendance. **Attendants only** (`USER`).
+
+      The client uploads one continuous burst of frames performing all three
+      challenged actions, together with the token from
+      `POST /api/v1/attendance/{eventId}/challenge` and the venue code. The
+      server runs the face engine over the raw frames itself and proves three
+      things from them: that the actions fired, in the challenged order; that
+      the face is the enrolled one; and that the capture is live rather than a
+      photograph or a replay. A live capture moves, so the challenged signals
+      must show real range across the burst, and a held still that clears a
+      single threshold still fails.
+
+      Both proofs are re-anchored here. The challenge token is consumed in a
+      guarded atomic update, so a replayed token loses the race and is
+      rejected, and the venue code is validated again. Checking the code only
+      at the preflight would have let someone photograph it, relay it off-site,
+      and upload from anywhere for the life of the challenge. The tolerance at
+      upload is widened to cover the challenge lifetime plus normal clock skew,
+      roughly three minutes of rotations, which is enough for a slow phone and
+      three prompted actions but not enough to be worth relaying.
+
+      A failed verification is not silently dropped. The frames are retained as
+      flagged evidence, an anomaly is raised (`REPLAY_SUSPECTED` when the
+      capture looks like a replayed template, `LIVENESS_FAILED` otherwise), and
+      an audit entry is written, so the integrity dashboards see the attempt.
+
+      On success the attendance row, the biometric last-used stamp, and the
+      audit entry commit in one transaction. A check-in that exists without its
+      audit trail would defeat the product, so a crash mid-sequence leaves
+      neither.
+
+      Shares the 20-per-15-minute per-principal limiter with the challenge
+      endpoint.
+    requestBody:
+      required: true
+      content:
+        multipart/form-data:
+          schema: { $ref: '#/components/schemas/AttendanceCaptureUpload' }
+          encoding:
+            frames:
+              contentType: image/jpeg, image/png, image/webp, image/heic, image/heif
+    responses:
+      '201':
+        description: |
+          Attendance recorded. `status` is `PRESENT` for a check-in inside the
+          first hour of the session and `LATE` after it, decided from the
+          server clock against the venue's local start time, never from
+          anything the client sent.
+        headers:
+          X-Request-Id: { $ref: '#/components/headers/XRequestId' }
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/AttendanceRecordResponse' }
+            example:
+              message: Attendance marked successfully as PRESENT.
+              data:
+                id: 901
+                status: PRESENT
+                userId: 12
+                sessionId: 41
+                checkInTime: '2026-08-04T06:12:44.000Z'
+                checkOutTime: null
+                autoCheckedOut: false
+                user:
+                  id: 12
+                  firstName: Amina
+                  lastName: Yakubu
+                  email: amina@example.com
+      '400':
+        description: |
+          The capture or the presence proof was unusable. `code` is
+          `VALIDATION_ERROR` for a missing token or venue code and for a frame
+          count outside 6 to 16, `INVALID_IMAGE` when a file's bytes are not
+          actually an image whatever its declared mimetype claimed, and
+          `UPLOAD_ERROR` when a frame exceeds 1.5 MB or too many files were
+          sent. Without a code, the venue code was no longer valid at upload,
+          the session window has closed, or the enrolled template could not be
+          read and the account needs re-enrolling.
+        headers:
+          X-Request-Id: { $ref: '#/components/headers/XRequestId' }
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/Error' }
+            example:
+              status: error
+              message: Please capture between 6 and 16 frames.
+              requestId: 3f1c9d2e-5b7a-4c11-9f60-2a8e4d0b7c31
+              code: VALIDATION_ERROR
+      '401':
+        description: |
+          Two very different causes, separated by `code`. The session itself
+          may be missing or expired, as on any endpoint. Otherwise the
+          challenge or the face check failed: `CHALLENGE_EXPIRED` for a token
+          past its 60 seconds or not verifiable, `CHALLENGE_INVALID` for one
+          minted for another actor, another event, or the other direction, and
+          `CHALLENGE_CONSUMED` for one already spent. A token that passes all
+          of those and still gets a bare 401 means the liveness verdict itself
+          failed, and the client should ask the user to retry in better light.
+
+          Note that a failed face check is 401 and not 403: it is a failure to
+          prove identity for this attempt, and retrying can succeed.
+        headers:
+          X-Request-Id: { $ref: '#/components/headers/XRequestId' }
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/Error' }
+            example:
+              status: error
+              message: Face verification failed. Please make sure you are in good lighting and follow the on-screen actions, then try again.
+              requestId: 3f1c9d2e-5b7a-4c11-9f60-2a8e4d0b7c31
+      '403':
+        description: The session belongs to an administrator. Only attendants check in.
+        headers:
+          X-Request-Id: { $ref: '#/components/headers/XRequestId' }
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/Error' }
+      '404':
+        description: No such event, or the account no longer exists.
+        headers:
+          X-Request-Id: { $ref: '#/components/headers/XRequestId' }
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/Error' }
+      '409':
+        description: |
+          The attendant checked in to this session between the preflight and
+          the upload, most likely from another device. Re-checked here rather
+          than trusted from the preflight, so two concurrent captures cannot
+          both produce a row.
+        headers:
+          X-Request-Id: { $ref: '#/components/headers/XRequestId' }
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/Error' }
+      '429': { $ref: '#/components/responses/RateLimited' }
+
+  put:
+    tags: [Attendance]
+    operationId: checkOut
+    summary: Check out with a single capture
+    description: |
+      The mirror of check-in, and held to exactly the same standard.
+      **Attendants only** (`USER`).
+
+      Check-out is face-verified rather than a plain button press because
+      duration is what the attendance record is worth: if signing out needed no
+      proof, one person could close out the session for a colleague who left
+      hours earlier. So the same two proofs apply, over a challenge minted with
+      `mode: out`, and a check-in challenge cannot be used here because the
+      direction is bound into the signed token.
+
+      Beyond the shared gates, three things are specific to this direction:
+      there must be an existing check-in for the running session, it must not
+      already have a check-out, and the check-out must land before the event's
+      daily end time and strictly after the check-in it closes.
+
+      An attendant who never checks out is not left open forever. The session
+      finalizer closes the books after the session ends and stamps
+      `autoCheckedOut`, which is how a report tells an administrative close
+      apart from a real face-verified one.
+
+      Shares the 20-per-15-minute per-principal limiter with the other
+      single-shot endpoints.
+    requestBody:
+      required: true
+      content:
+        multipart/form-data:
+          schema: { $ref: '#/components/schemas/AttendanceCaptureUpload' }
+          encoding:
+            frames:
+              contentType: image/jpeg, image/png, image/webp, image/heic, image/heif
+    responses:
+      '200':
+        description: |
+          Checked out. 200 rather than 201, because this updates the existing
+          attendance row rather than creating one. `status` is unchanged: it
+          records how the check-in was classified and is not revised at
+          check-out.
+        headers:
+          X-Request-Id: { $ref: '#/components/headers/XRequestId' }
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/AttendanceRecordResponse' }
+            example:
+              message: Successfully checked out of the session.
+              data:
+                id: 901
+                status: PRESENT
+                userId: 12
+                sessionId: 41
+                checkInTime: '2026-08-04T06:12:44.000Z'
+                checkOutTime: '2026-08-04T17:58:02.000Z'
+                autoCheckedOut: false
+      '400':
+        description: |
+          Same upload and presence failures as check-in, plus two that only
+          apply in this direction: the check-out window for today has closed,
+          or the check-out time would not be after the check-in time.
+        headers:
+          X-Request-Id: { $ref: '#/components/headers/XRequestId' }
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/Error' }
+            example:
+              status: error
+              message: Check-out window has closed. The check-out deadline was 19:30.
+              requestId: 3f1c9d2e-5b7a-4c11-9f60-2a8e4d0b7c31
+      '401':
+        description: |
+          As for check-in: an invalid session, an expired, mismatched, or
+          already-spent challenge token (`CHALLENGE_EXPIRED`,
+          `CHALLENGE_INVALID`, `CHALLENGE_CONSUMED`), or a failed liveness
+          verdict.
+        headers:
+          X-Request-Id: { $ref: '#/components/headers/XRequestId' }
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/Error' }
+      '403':
+        description: The session belongs to an administrator. Only attendants check out.
+        headers:
+          X-Request-Id: { $ref: '#/components/headers/XRequestId' }
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/Error' }
+      '404':
+        description: |
+          No such event or account, no session of this event is running right
+          now, or there is no check-in on this session to close.
+        headers:
+          X-Request-Id: { $ref: '#/components/headers/XRequestId' }
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/Error' }
+            example:
+              status: error
+              message: No attendance record found. You must check in to the event first.
+              requestId: 3f1c9d2e-5b7a-4c11-9f60-2a8e4d0b7c31
+      '409':
+        description: This session has already been checked out of.
+        headers:
+          X-Request-Id: { $ref: '#/components/headers/XRequestId' }
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/Error' }
+      '429': { $ref: '#/components/responses/RateLimited' }
+
+/api/v1/attendance/{eventId}/step-challenge:
+  parameters:
+    - name: eventId
+      in: path
+      required: true
+      description: The event being attended.
+      schema:
+        type: integer
+        minimum: 1
+  post:
+    tags: [Attendance]
+    operationId: createAttendanceStepChallenge
+    summary: Open a guided check-in or check-out attempt
+    description: |
+      Step one of the guided flow. **Attendants only** (`USER`).
+
+      The gates are identical to the single-shot preflight: same venue code,
+      same enrollment and consent checks, same session window, same
+      already-checked-in guard. What differs is what the client does next.
+
+      In the single-shot flow the user performs all three actions in one
+      recording and finds out at the end whether the whole capture passed. That
+      is unforgiving on a phone in bad light: one missed blink throws away the
+      other two actions. The guided flow trades round-trips for that. The
+      server names one action, the client captures a short dense burst of just
+      that action, the server verifies it and only then names the next. A
+      failed step does not advance the challenge, so the user simply repeats
+      the action they fumbled instead of restarting the scan.
+
+      The token is correspondingly longer-lived, five minutes rather than 60
+      seconds, because the flow spans several verified round-trips. That costs
+      nothing in safety: the challenge is single-use, presence was proven here,
+      and presence is proven again at the final commit.
+
+      A guided token carries a different purpose tag from a single-shot one, so
+      the two flows cannot be crossed: a step token posted to the single-shot
+      capture endpoint is rejected, and the reverse.
+
+      Rate limited to 20 attempts per 15 minutes, keyed per principal, with a
+      `RAPID_ATTEMPTS` anomaly raised on the wall.
+    requestBody:
+      required: true
+      content:
+        application/json:
+          schema: { $ref: '#/components/schemas/AttendanceChallengeRequest' }
+    responses:
+      '200':
+        description: |
+          The scan has started. The client prompts for `nextAction` and posts
+          that one action's frames to `/api/v1/attendance/{eventId}/step`.
+        headers:
+          X-Request-Id: { $ref: '#/components/headers/XRequestId' }
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/AttendanceStepChallengeResponse' }
+            example:
+              message: Step-by-step scan started. Perform the first action.
+              data:
+                actions: [SMILE, BLINK, TURN_RIGHT]
+                challengeToken: eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJ1c2VySWQiOjEyfQ.s1gnatur3
+                currentStep: 0
+                nextAction: SMILE
+                totalSteps: 3
+                expiresAt: '2026-08-04T09:35:00.000Z'
+      '400':
+        description: |
+          As for the single-shot preflight: `VALIDATION_ERROR` for a malformed
+          body or event id, `BIOMETRIC_CONSENT_STALE` for a template consented
+          to under an outdated policy version, or an uncoded failure naming a
+          rejected venue code, a missing enrollment, or a closed session
+          window.
+        headers:
+          X-Request-Id: { $ref: '#/components/headers/XRequestId' }
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/Error' }
+      '401': { $ref: '#/components/responses/Unauthorized' }
+      '403':
+        description: The session belongs to an administrator. Only attendants mark attendance.
+        headers:
+          X-Request-Id: { $ref: '#/components/headers/XRequestId' }
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/Error' }
+      '404':
+        description: |
+          No such event or account, or, with `mode: out`, no check-in on the
+          running session to close.
+        headers:
+          X-Request-Id: { $ref: '#/components/headers/XRequestId' }
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/Error' }
+      '409':
+        description: |
+          Already checked in (`mode: in`) or already checked out
+          (`mode: out`) for this session.
+        headers:
+          X-Request-Id: { $ref: '#/components/headers/XRequestId' }
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/Error' }
+      '429': { $ref: '#/components/responses/RateLimited' }
+
+/api/v1/attendance/{eventId}/step:
+  parameters:
+    - name: eventId
+      in: path
+      required: true
+      description: The event being attended. Must match the event the step challenge was issued for.
+      schema:
+        type: integer
+        minimum: 1
+  post:
+    tags: [Attendance]
+    operationId: stepCheckIn
+    summary: Submit one action of a guided check-in
+    description: |
+      Proves a single action of a guided check-in. **Attendants only**
+      (`USER`). Called once per action, always with the same challenge token
+      from `POST /api/v1/attendance/{eventId}/step-challenge`.
+
+      **This operation has two success statuses and they mean different
+      things.** While the flow is still in progress it answers **200** with
+      `done: false` and the next action to prompt for. On the final step, when
+      the attendance row is created, it answers **201** with `done: true` and
+      the record. A client should branch on `data.done` rather than on the
+      status code, but the code is there so a generic HTTP layer sees a
+      creation only when something was actually created.
+
+      The client never tells the server which step it is on. The server holds
+      the authoritative action list and the current index, and advances it with
+      a guarded atomic update, so a duplicated or out-of-order submit loses the
+      race and is refused rather than counted twice. Identity is re-proven
+      against the enrolled template on every step, so a mid-scan face swap
+      cannot ride in on a later action.
+
+      Presence and the attendance state are re-checked at the final step only.
+      The intermediate steps are already authenticated by the step token, and
+      anchoring the venue-code check to the moment of the write is what stops a
+      relayed code from ever producing a record. The tolerance at that commit
+      covers the five-minute challenge lifetime, which is safe precisely
+      because the challenge is single-use.
+
+      A failed action is recorded the same way a failed single-shot capture is:
+      flagged evidence, an anomaly, and an audit entry, so step failures are
+      visible to the integrity dashboards rather than invisible retries.
+
+      Rate limited separately from the single-shot endpoints, at 60 requests
+      per 15 minutes per principal, since one guided scan is three requests
+      plus any retries. Hitting it also raises a `RAPID_ATTEMPTS` anomaly.
+    requestBody:
+      required: true
+      content:
+        multipart/form-data:
+          schema: { $ref: '#/components/schemas/AttendanceStepCaptureUpload' }
+          encoding:
+            frames:
+              contentType: image/jpeg, image/png, image/webp, image/heic, image/heif
+    responses:
+      '200':
+        description: |
+          The action was verified and there are more to go. Prompt for
+          `nextAction` and post the next burst with the same token.
+        headers:
+          X-Request-Id: { $ref: '#/components/headers/XRequestId' }
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/AttendanceStepProgressResponse' }
+            example:
+              message: Action verified. Perform the next action.
+              data:
+                done: false
+                currentStep: 1
+                nextAction: BLINK
+                totalSteps: 3
+      '201':
+        description: |
+          The last action was verified and attendance was recorded. The row,
+          the biometric last-used stamp, and the audit entry commit together,
+          and the challenge is consumed in the same moment, so the token cannot
+          be replayed.
+        headers:
+          X-Request-Id: { $ref: '#/components/headers/XRequestId' }
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/AttendanceStepCompleteResponse' }
+            example:
+              message: Attendance marked successfully as PRESENT.
+              data:
+                done: true
+                attendance:
+                  id: 901
+                  status: PRESENT
+                  userId: 12
+                  sessionId: 41
+                  checkInTime: '2026-08-04T06:12:44.000Z'
+                  checkOutTime: null
+                  autoCheckedOut: false
+      '400':
+        description: |
+          `VALIDATION_ERROR` for a missing token or venue code and for a frame
+          count outside 4 to 20, `INVALID_IMAGE` for a file whose bytes are not
+          an image, `UPLOAD_ERROR` for a frame over 1.5 MB or too many files.
+          On the final step it also covers a venue code that is no longer
+          valid, or a session window that closed mid-scan.
+        headers:
+          X-Request-Id: { $ref: '#/components/headers/XRequestId' }
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/Error' }
+            example:
+              status: error
+              message: Please capture between 4 and 20 frames for this step.
+              requestId: 3f1c9d2e-5b7a-4c11-9f60-2a8e4d0b7c31
+              code: VALIDATION_ERROR
+      '401':
+        description: |
+          The session is invalid, the step token is (`CHALLENGE_EXPIRED` for an
+          unverifiable or timed-out token, `CHALLENGE_INVALID` for one belonging
+          to another actor, event, or direction, `CHALLENGE_CONSUMED` for a
+          completed or expired scan), or the action itself was not proven.
+
+          The last case is `code: STEP_FAILED` and it is the normal, expected
+          failure of this endpoint. The message names the action to retry, and
+          the challenge does **not** advance, so the client simply prompts for
+          the same action again. Outside production the response also carries
+          the action and the engine's reasons under `details`.
+        headers:
+          X-Request-Id: { $ref: '#/components/headers/XRequestId' }
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/Error' }
+            example:
+              status: error
+              message: We didn't catch your blink. Look at the camera and blink clearly, then try this step again.
+              requestId: 3f1c9d2e-5b7a-4c11-9f60-2a8e4d0b7c31
+              code: STEP_FAILED
+      '403':
+        description: The session belongs to an administrator. Only attendants check in.
+        headers:
+          X-Request-Id: { $ref: '#/components/headers/XRequestId' }
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/Error' }
+      '404':
+        description: No such event, or the account no longer exists.
+        headers:
+          X-Request-Id: { $ref: '#/components/headers/XRequestId' }
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/Error' }
+      '409':
+        description: |
+          The step could not be applied. Either every action has already been
+          proven and the scan is complete, or this exact step was already
+          recorded by a concurrent or duplicated submit and the client should
+          continue with the next one. On the final step it also means the
+          attendant checked in from somewhere else while the scan was running.
+        headers:
+          X-Request-Id: { $ref: '#/components/headers/XRequestId' }
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/Error' }
+            example:
+              status: error
+              message: This scan is already complete.
+              requestId: 3f1c9d2e-5b7a-4c11-9f60-2a8e4d0b7c31
+      '429': { $ref: '#/components/responses/RateLimited' }
+
+  put:
+    tags: [Attendance]
+    operationId: stepCheckOut
+    summary: Submit one action of a guided check-out
+    description: |
+      The check-out half of the guided flow. **Attendants only** (`USER`).
+      Identical in mechanics to the guided check-in: one action per request,
+      the server decides which step it is, a failed action does not advance,
+      and presence is re-proven at the final commit.
+
+      **Unlike the guided check-in, this operation always answers 200**, both
+      while the flow is in progress and when it completes, because the final
+      step updates the existing attendance row rather than creating one. The
+      only reliable way to tell the two apart is `data.done`.
+
+      The token must have been minted with `mode: out`, and the usual check-out
+      preconditions are enforced at the final step: an existing check-in on the
+      running session, no check-out already recorded, and a time inside the
+      event's daily window and after the check-in itself.
+
+      Shares the 60-per-15-minute per-principal step limiter with the guided
+      check-in.
+    requestBody:
+      required: true
+      content:
+        multipart/form-data:
+          schema: { $ref: '#/components/schemas/AttendanceStepCaptureUpload' }
+          encoding:
+            frames:
+              contentType: image/jpeg, image/png, image/webp, image/heic, image/heif
+    responses:
+      '200':
+        description: |
+          Either the action was verified with more to go (`done: false`), or it
+          was the last one and the check-out is recorded (`done: true`, with
+          the attendance row). Branch on `data.done`.
+        headers:
+          X-Request-Id: { $ref: '#/components/headers/XRequestId' }
+        content:
+          application/json:
+            schema:
+              oneOf:
+                - $ref: '#/components/schemas/AttendanceStepProgressResponse'
+                - $ref: '#/components/schemas/AttendanceStepCompleteResponse'
+            examples:
+              inProgress:
+                summary: Action verified, more steps remain
+                value:
+                  message: Action verified. Perform the next action.
+                  data:
+                    done: false
+                    currentStep: 2
+                    nextAction: TURN_RIGHT
+                    totalSteps: 3
+              completed:
+                summary: Final action verified, check-out recorded
+                value:
+                  message: Successfully checked out of the session.
+                  data:
+                    done: true
+                    attendance:
+                      id: 901
+                      status: PRESENT
+                      userId: 12
+                      sessionId: 41
+                      checkInTime: '2026-08-04T06:12:44.000Z'
+                      checkOutTime: '2026-08-04T17:58:02.000Z'
+                      autoCheckedOut: false
+      '400':
+        description: |
+          The same upload failures as the guided check-in (`VALIDATION_ERROR`
+          for a frame count outside 4 to 20 or a missing field, `INVALID_IMAGE`,
+          `UPLOAD_ERROR`), plus, at the final step, a rejected venue code, a
+          closed check-out window, or a check-out that would not be after the
+          check-in.
+        headers:
+          X-Request-Id: { $ref: '#/components/headers/XRequestId' }
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/Error' }
+      '401':
+        description: |
+          An invalid session, a bad step token (`CHALLENGE_EXPIRED`,
+          `CHALLENGE_INVALID` including a token minted for a check-in,
+          `CHALLENGE_CONSUMED`), or `STEP_FAILED` when the action was not
+          proven, in which case the same step is prompted again.
+        headers:
+          X-Request-Id: { $ref: '#/components/headers/XRequestId' }
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/Error' }
+      '403':
+        description: The session belongs to an administrator. Only attendants check out.
+        headers:
+          X-Request-Id: { $ref: '#/components/headers/XRequestId' }
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/Error' }
+      '404':
+        description: |
+          No such event or account, no session running right now, or no
+          check-in on this session to close.
+        headers:
+          X-Request-Id: { $ref: '#/components/headers/XRequestId' }
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/Error' }
+      '409':
+        description: |
+          The scan is already complete, this step was already recorded, or the
+          session had already been checked out of by the time the final step
+          arrived.
+        headers:
+          X-Request-Id: { $ref: '#/components/headers/XRequestId' }
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/Error' }
+      '429': { $ref: '#/components/responses/RateLimited' }
+
+/api/v1/attendance/users/{userId}:
+  parameters:
+    - name: userId
+      in: path
+      required: true
+      description: The attendant whose history is being read.
+      schema:
+        type: integer
+        minimum: 1
+  get:
+    tags: [Attendance]
+    operationId: listUserAttendance
+    summary: List one attendant's attendance across events
+    description: |
+      One attendant's history, newest check-in first. Open to **`ADMIN` and
+      `USER`**, but an attendant may only read their own: any other id is 403,
+      never 404, so the endpoint cannot be used to discover which ids exist.
+
+      The denial is deliberately 403 and not 401. Cookie clients read a 401 as
+      "session expired" and sign the user out, so answering 401 here would mean
+      a stale bookmark or a probe logged a legitimate user out instead of
+      showing an error.
+
+      Administrators and attendants live in separate tables with independent id
+      sequences, so "self" requires the principal type to match as well as the
+      id. An administrator reading their own id is a real case, since the
+      dashboard shares this call, and it returns an empty page rather than a
+      404, because an administrator has no attendant row and therefore no
+      attendance by definition.
+
+      `search` matches across the event's title, description, and type and the
+      venue's name, city, and country, so one box covers "what was it" and
+      "where was it". Rows with no check-in time, meaning `ABSENT` rows written
+      by the finalizer, sort to the end rather than to the top.
+    parameters:
+      - $ref: '#/components/parameters/Page'
+      - $ref: '#/components/parameters/Limit'
+      - $ref: '#/components/parameters/Search'
+      - $ref: '#/components/parameters/AttendanceStatusFilter'
+      - $ref: '#/components/parameters/AttendanceEventTypeFilter'
+      - $ref: '#/components/parameters/StartDate'
+      - $ref: '#/components/parameters/EndDate'
+    responses:
+      '200':
+        description: |
+          A page of attendance rows. The date range filters on check-in time
+          and its bounds are venue-local day boundaries, not the server's, so a
+          host and a venue in different timezones do not shift the edges of a
+          day. An empty page carries the empty-state message and reports a
+          `meta.total` of 0.
+        headers:
+          X-Request-Id: { $ref: '#/components/headers/XRequestId' }
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/AttendanceListResponse' }
+            example:
+              message: User attendance successfully fetched.
+              data:
+                - id: 901
+                  status: PRESENT
+                  userId: 12
+                  sessionId: 41
+                  checkInTime: '2026-08-04T06:12:44.000Z'
+                  checkOutTime: '2026-08-04T17:58:02.000Z'
+                  autoCheckedOut: false
+              meta: { total: 1, page: 1, limit: 10, totalPages: 1 }
+      '400':
+        description: |
+          A malformed user id, a `status` outside `PRESENT`, `LATE`, `ABSENT`,
+          or an array where a single value was expected. Express turns
+          `?search[]=a&search[]=b` into an array, and these are rejected with a
+          clean validation error rather than being passed to the query builder.
+        headers:
+          X-Request-Id: { $ref: '#/components/headers/XRequestId' }
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/Error' }
+      '401': { $ref: '#/components/responses/Unauthorized' }
+      '403':
+        description: An attendant asked for someone else's attendance.
+        headers:
+          X-Request-Id: { $ref: '#/components/headers/XRequestId' }
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/Error' }
+            example:
+              status: error
+              message: Only admins can access other users' attendance.
+              requestId: 3f1c9d2e-5b7a-4c11-9f60-2a8e4d0b7c31
+      '404':
+        description: No such attendant, or the account has been soft-deleted.
+        headers:
+          X-Request-Id: { $ref: '#/components/headers/XRequestId' }
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/Error' }
+
+/api/v1/attendance/events/{eventId}:
+  parameters:
+    - name: eventId
+      in: path
+      required: true
+      description: The event whose roster is being read.
+      schema:
+        type: integer
+        minimum: 1
+  get:
+    tags: [Attendance]
+    operationId: listEventAttendance
+    summary: List everyone's attendance for one event
+    description: |
+      The roster view: every attendance row for one event across all of its
+      sessions. **`ADMIN` only.** An attendant gets 403, because this is the
+      one attendance list that discloses other people's names, addresses, and
+      arrival times.
+
+      The search box is deliberately overloaded. A term matches the attendant's
+      first name, last name, or email, and a purely numeric term additionally
+      matches the session id, so narrowing to one occurrence usually needs no
+      separate filter. `sessionId` remains available for the unambiguous case.
+
+      A soft-deleted event reads as absent here, so the roster of a removed
+      event is not served even though its history is still on file for reports.
+    parameters:
+      - $ref: '#/components/parameters/Page'
+      - $ref: '#/components/parameters/Limit'
+      - $ref: '#/components/parameters/Search'
+      - $ref: '#/components/parameters/AttendanceStatusFilter'
+      - $ref: '#/components/parameters/AttendanceSessionIdFilter'
+      - $ref: '#/components/parameters/StartDate'
+      - $ref: '#/components/parameters/EndDate'
+    responses:
+      '200':
+        description: |
+          A page of attendance rows for this event, newest check-in first, with
+          `ABSENT` rows sorted last. An empty page carries the empty-state
+          message and a `meta.total` of 0.
+        headers:
+          X-Request-Id: { $ref: '#/components/headers/XRequestId' }
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/AttendanceListResponse' }
+            example:
+              message: Event attendance successfully fetched.
+              data:
+                - id: 901
+                  status: LATE
+                  userId: 12
+                  sessionId: 41
+                  checkInTime: '2026-08-04T07:40:11.000Z'
+                  checkOutTime: null
+                  autoCheckedOut: false
+                  user:
+                    id: 12
+                    firstName: Amina
+                    lastName: Yakubu
+                    email: amina@example.com
+                    profilePicture: null
+              meta: { total: 1, page: 1, limit: 10, totalPages: 1 }
+      '400':
+        description: |
+          A malformed event id or session id, a `status` outside the three
+          known values, or an array passed where a single value was expected.
+        headers:
+          X-Request-Id: { $ref: '#/components/headers/XRequestId' }
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/Error' }
+      '401': { $ref: '#/components/responses/Unauthorized' }
+      '403':
+        description: An attendant tried to read a whole event's roster.
+        headers:
+          X-Request-Id: { $ref: '#/components/headers/XRequestId' }
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/Error' }
+      '404':
+        description: No such event, or it has been soft-deleted.
+        headers:
+          X-Request-Id: { $ref: '#/components/headers/XRequestId' }
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/Error' }
+
+/api/v1/attendance/users/{userId}/events/{eventId}:
+  parameters:
+    - name: userId
+      in: path
+      required: true
+      description: The attendant whose history is being read.
+      schema:
+        type: integer
+        minimum: 1
+    - name: eventId
+      in: path
+      required: true
+      description: The event to scope that history to.
+      schema:
+        type: integer
+        minimum: 1
+  get:
+    tags: [Attendance]
+    operationId: listUserEventAttendance
+    summary: List one attendant's attendance for one event
+    description: |
+      The intersection of the other two lists: one attendant, one event, one
+      row per session they were expected at. Open to **`ADMIN` and `USER`**
+      under the same rule as the per-user list, so an attendant may only read
+      their own and anyone else's is 403 rather than 404.
+
+      This is the view behind "how has this person attended this course", which
+      is why it has no free-text search: with both the person and the event
+      already fixed, the only useful narrowing is by session, status, or date,
+      and those are exact filters.
+
+      Both the attendant and the event must exist and be live. As on the
+      per-user list, an administrator reading their own id against a real event
+      gets an empty page rather than a 404, since an administrator has no
+      attendant row to have attendance on.
+    parameters:
+      - $ref: '#/components/parameters/Page'
+      - $ref: '#/components/parameters/Limit'
+      - $ref: '#/components/parameters/AttendanceStatusFilter'
+      - $ref: '#/components/parameters/AttendanceSessionIdFilter'
+      - $ref: '#/components/parameters/StartDate'
+      - $ref: '#/components/parameters/EndDate'
+    responses:
+      '200':
+        description: |
+          A page of this attendant's rows for this event, newest check-in
+          first. An empty page carries the empty-state message and a
+          `meta.total` of 0.
+        headers:
+          X-Request-Id: { $ref: '#/components/headers/XRequestId' }
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/AttendanceListResponse' }
+            example:
+              message: User event attendance successfully fetched.
+              data:
+                - id: 901
+                  status: PRESENT
+                  userId: 12
+                  sessionId: 41
+                  checkInTime: '2026-08-04T06:12:44.000Z'
+                  checkOutTime: '2026-08-04T17:58:02.000Z'
+                  autoCheckedOut: false
+              meta: { total: 1, page: 1, limit: 10, totalPages: 1 }
+      '400':
+        description: |
+          A malformed user id, event id, or session id, a `status` outside the
+          three known values, or an array passed where a single value was
+          expected.
+        headers:
+          X-Request-Id: { $ref: '#/components/headers/XRequestId' }
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/Error' }
+      '401': { $ref: '#/components/responses/Unauthorized' }
+      '403':
+        description: An attendant asked for someone else's attendance.
+        headers:
+          X-Request-Id: { $ref: '#/components/headers/XRequestId' }
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/Error' }
+      '404':
+        description: |
+          No such attendant or no such event, or either has been soft-deleted.
+        headers:
+          X-Request-Id: { $ref: '#/components/headers/XRequestId' }
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/Error' }

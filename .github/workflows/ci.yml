@@ -46,6 +46,12 @@ jobs:
           cache: npm
       - run: npm ci
       - run: npm run lint
+      # API reference gate: validates the OpenAPI document and diffs it against
+      # the routes the app actually mounts. A new endpoint shipped without docs,
+      # or a documented path that no longer exists, fails here rather than
+      # leaving the public reference quietly wrong.
+      - name: Check API reference matches the routes
+        run: npm run docs:check
       # Fail the build on a known HIGH/critical advisory in a production
       # dependency (dev-only and moderate advisories do not block). Dependabot
       # (see .github/dependabot.yml) opens the bump PRs; this gate stops a new

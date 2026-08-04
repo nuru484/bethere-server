@@ -1,0 +1,554 @@
+# Two administrator-only surfaces that both answer the question "what actually
+# happened?".
+#
+# Reports flatten the attendance graph (attendance -> session -> event ->
+# location) into one row per check-in so an operator can filter, read, and
+# export it without understanding the schema. Review exposes the detective
+# controls the attendance pipeline writes as it runs: the append-only audit log
+# and the anomaly flags raised when an attempt looked wrong.
+#
+# The filter parameters below are shared by the report list and its .xlsx
+# export on purpose. Both endpoints read the same query in the same way, which
+# is what guarantees an export contains exactly the rows the operator is
+# looking at on screen.
+
+parameters:
+  ReportUserId:
+    name: userId
+    in: query
+    required: false
+    description: |
+      Restrict the report to one attendant. Must parse as an integer; anything
+      else is a 400 rather than a silently ignored filter, because a mistyped
+      id that quietly returned the whole roster would be read as that
+      attendant's record.
+    schema:
+      type: integer
+      minimum: 1
+
+  ReportEventName:
+    name: eventName
+    in: query
+    required: false
+    description: |
+      Case-insensitive substring match on the event title. Distinct from
+      `search`, which also reaches the attendant and the venue: use this when
+      you know which event you want and do not want a person's name matching
+      it by coincidence.
+    schema:
+      type: string
+
+  ReportLocationName:
+    name: locationName
+    in: query
+    required: false
+    description: Case-insensitive substring match on the venue name.
+    schema:
+      type: string
+
+  ReportStatus:
+    name: status
+    in: query
+    required: false
+    description: |
+      Exact attendance status, case-insensitive on input. An unrecognized value
+      is a 400 listing the accepted set, so a typo never returns an empty
+      report that reads like "nobody attended".
+    schema:
+      type: string
+      enum: [PRESENT, LATE, ABSENT]
+
+  ReportIsRecurring:
+    name: isRecurring
+    in: query
+    required: false
+    description: |
+      Split one-off events from repeating ones. Only the literal `true` is
+      treated as true; any other present value filters for non-recurring
+      events. Omit the parameter entirely to include both.
+    schema:
+      type: boolean
+
+  ReportEventType:
+    name: eventType
+    in: query
+    required: false
+    description: |
+      Case-insensitive substring match on the event's free-text type, for
+      example `MEETING` or `TRAINING`. It is a substring rather than an exact
+      match because the column is not an enum and deployments label their own
+      categories.
+    schema:
+      type: string
+
+  ReportCheckInStartDate:
+    name: checkInStartDate
+    in: query
+    required: false
+    description: |
+      Inclusive lower bound on when attendance was actually recorded. Day
+      boundaries are resolved in the venue timezone, not the caller's and not
+      the server's, so a day filter matches the wall clock the attendants
+      checked in against.
+    schema:
+      type: string
+      format: date
+
+  ReportCheckInEndDate:
+    name: checkInEndDate
+    in: query
+    required: false
+    description: |
+      Inclusive upper bound on the check-in instant, stretched to the last
+      millisecond of that venue-local day. Passing the same value as
+      `checkInStartDate` therefore returns a single full day rather than
+      nothing.
+    schema:
+      type: string
+      format: date
+
+  ReportSessionStartDate:
+    name: sessionStartDate
+    in: query
+    required: false
+    description: |
+      Inclusive lower bound on the session's own start date. This filters by
+      when the event was scheduled, which is not the same question as when
+      someone checked in: an `ABSENT` row written by the session finalizer has
+      a session date but no check-in time at all.
+    schema:
+      type: string
+      format: date
+
+  ReportSessionEndDate:
+    name: sessionEndDate
+    in: query
+    required: false
+    description: |
+      Inclusive upper bound on the session's end date, extended to the end of
+      that day so a single-day session on the boundary is included.
+    schema:
+      type: string
+      format: date
+
+  ReportCity:
+    name: city
+    in: query
+    required: false
+    description: Case-insensitive substring match on the venue's city.
+    schema:
+      type: string
+
+  ReportCountry:
+    name: country
+    in: query
+    required: false
+    description: Case-insensitive substring match on the venue's country.
+    schema:
+      type: string
+
+  ReviewAuditAction:
+    name: action
+    in: query
+    required: false
+    description: |
+      Exact match on the action name, not a substring: audit actions are a
+      fixed vocabulary written by the server, so narrowing to
+      `CHECK_IN_LIVENESS_FAILED` should never also return
+      `CHECK_IN_LIVENESS_FAILED_STEP`.
+    schema:
+      type: string
+      examples: [CHECK_IN_LIVENESS_FAILED]
+
+  ReviewActorKind:
+    name: actorKind
+    in: query
+    required: false
+    description: |
+      Exact match on who acted. `SYSTEM` covers entries written by background
+      jobs such as the session finalizer and the retention purge, which have no
+      signed-in principal behind them.
+    schema:
+      type: string
+      enum: [ADMIN, USER, SYSTEM]
+
+  ReviewResolved:
+    name: resolved
+    in: query
+    required: false
+    description: |
+      Filter by review state. `false` is the working queue, the flags nobody
+      has signed off yet; `true` is the closed history. Omit it to see both.
+      Any value other than these two literals is treated as no filter.
+    schema:
+      type: boolean
+
+  ReviewAnomalyTypeFilter:
+    name: type
+    in: query
+    required: false
+    description: |
+      Restrict to one kind of signal. Matched case-insensitively against the
+      enum, and an unrecognized value is a 400 naming the valid set rather than
+      an empty page that would read as "no anomalies of this kind".
+    schema:
+      $ref: '#/components/schemas/ReviewAnomalyType'
+
+  ReviewAnomalyIdPath:
+    name: anomalyId
+    in: path
+    required: true
+    description: The anomaly flag's id, as returned by `GET /api/v1/review/anomalies`.
+    schema:
+      type: integer
+      minimum: 1
+
+schemas:
+  ReportLocation:
+    type: object
+    description: |
+      The venue, flattened onto the row. City and country are optional on a
+      location, so both can be null even when a name is present.
+    required: [id, name]
+    properties:
+      id: { type: integer, examples: [7] }
+      name: { type: string, examples: [Main Hall] }
+      city: { type: [string, 'null'], examples: [Accra] }
+      country: { type: [string, 'null'], examples: [Ghana] }
+
+  ReportRow:
+    type: object
+    description: |
+      One attendance record with its session, event, and venue already resolved
+      onto it. The report deliberately flattens instead of nesting the way the
+      attendance endpoints do: a report is read as a table and exported as a
+      spreadsheet, and both want columns rather than an object graph.
+
+      The attendant's own fields are copied in, so a row still renders after the
+      account is soft-deleted. Attendance history outlives the account on
+      purpose, otherwise removing a person would rewrite the past.
+    required:
+      [attendanceId, userName, userEmail, userId, eventTitle, eventId, eventType,
+       isRecurring, sessionId, sessionStartDate, sessionEndDate, location, status, createdAt]
+    properties:
+      attendanceId:
+        type: integer
+        description: The attendance row's id, unique across the whole report.
+        examples: [4021]
+      userName:
+        type: string
+        description: First and last name joined for display. Not a field you can filter on directly; use `search`.
+        examples: [Alice Wonder]
+      userEmail: { type: string, format: email, examples: [alice@example.com] }
+      userId: { type: integer, examples: [12] }
+      eventTitle: { type: string, examples: [Weekly Standup] }
+      eventId: { type: integer, examples: [3] }
+      eventType:
+        type: string
+        description: The deployment's own event category, free text rather than an enum.
+        examples: [MEETING]
+      isRecurring: { type: boolean, examples: [true] }
+      sessionId:
+        type: integer
+        description: |
+          The specific occurrence attended. A recurring event has one session
+          per occurrence, which is why the report keys on the session and not
+          just the event.
+        examples: [58]
+      sessionStartDate:
+        type: string
+        format: date-time
+        description: Date-only, stored as UTC midnight, so it is not shifted into a neighbouring day.
+      sessionEndDate: { type: string, format: date-time }
+      location: { $ref: '#/components/schemas/ReportLocation' }
+      checkInTime:
+        type: [string, 'null']
+        format: date-time
+        description: |
+          Null on `ABSENT` rows written by the session finalizer: nobody checked
+          in, so there is no instant to record. Rows are ordered by this field,
+          newest first.
+      checkOutTime:
+        type: [string, 'null']
+        format: date-time
+        description: |
+          Null while an attendance is still open, and also for anyone who never
+          signed out before the finalizer closed the session.
+      status:
+        type: string
+        enum: [PRESENT, LATE, ABSENT]
+        description: |
+          `LATE` is assigned when the check-in landed after the session's grace
+          window, `ABSENT` is written by the finalizer for an expected attendee
+          who never appeared.
+      createdAt: { type: string, format: date-time }
+
+  ReportTopAttendee:
+    type: object
+    description: |
+      One entry in the leaderboard. The count is over the entire filtered set,
+      not the current page, so it does not change as an operator pages through
+      the report.
+    required: [userId, userName, email, attendanceCount]
+    properties:
+      userId: { type: integer, examples: [12] }
+      userName: { type: string, examples: [Alice Wonder] }
+      email: { type: string, format: email, examples: [alice@example.com] }
+      profilePicture:
+        type: [string, 'null']
+        format: uri
+        description: Cloudinary URL, or null when the attendant has not uploaded one.
+      attendanceCount:
+        type: integer
+        minimum: 1
+        description: Matching attendance rows for this attendant under the current filters.
+        examples: [3]
+
+  ReportSummary:
+    type: object
+    description: |
+      Status totals for the whole filtered set. `totalAttendance` is the same
+      number as `meta.total`; it is repeated here so the summary block is
+      self-contained for a client that renders it as a standalone card.
+    required: [totalAttendance, presentCount, lateCount, absentCount]
+    properties:
+      totalAttendance: { type: integer, minimum: 0, examples: [4] }
+      presentCount: { type: integer, minimum: 0, examples: [2] }
+      lateCount: { type: integer, minimum: 0, examples: [1] }
+      absentCount: { type: integer, minimum: 0, examples: [1] }
+
+  ReportListResponse:
+    type: object
+    description: |
+      The report page. This is the one list endpoint in the API that does not
+      answer with a plain `{ message, data, meta }` envelope: it adds
+      `topAttendees` and `summary` as top-level siblings of `data`.
+
+      They sit outside `data` because they are not properties of the page. Both
+      are computed over every row matching the filters, so paging from page 1 to
+      page 5 changes `data` and leaves the leaderboard and the totals exactly
+      where they were. Nesting them inside a page of rows would suggest they
+      described that page, and a client would be right to recompute them per
+      page, which is precisely the wrong answer.
+    required: [message, data, topAttendees, summary, meta]
+    properties:
+      message: { type: string, examples: [Attendance reports successfully fetched.] }
+      data:
+        type: array
+        description: The current page of rows, ordered by check-in time, newest first.
+        items: { $ref: '#/components/schemas/ReportRow' }
+      topAttendees:
+        type: array
+        maxItems: 5
+        description: |
+          The five most frequent attendants under the current filters, highest
+          count first. Shorter than five, or empty, when fewer distinct
+          attendants match.
+        items: { $ref: '#/components/schemas/ReportTopAttendee' }
+      summary: { $ref: '#/components/schemas/ReportSummary' }
+      meta: { $ref: '#/components/schemas/PaginationMeta' }
+
+  ReviewAnomalyType:
+    type: string
+    description: |
+      What the pipeline thought it saw. These are detective controls, not
+      preventive ones: a flag records that an attempt looked wrong, and the
+      venue-code and liveness gates decide separately whether the attempt was
+      allowed through.
+
+      - `DUPLICATE_DESCRIPTOR`: a face being enrolled matched a template already
+        held by another account, which is the shape of one person enrolling
+        twice or enrolling on a colleague's behalf. Enrollment is refused.
+      - `LIVENESS_FAILED`: the server-side liveness check rejected the frames,
+        either because the requested actions were not performed or because the
+        face did not match the enrolled descriptor.
+      - `REPLAY_SUSPECTED`: the submitted frames looked like recorded or reused
+        media rather than a live capture. Raised at HIGH severity, because
+        unlike a fumbled liveness attempt this one implies intent.
+      - `RAPID_ATTEMPTS`: the attendant hit the check-in or scan rate limit. A
+        genuine attendee never needs twenty tries in fifteen minutes, so hitting
+        that wall is itself the signal.
+    enum: [DUPLICATE_DESCRIPTOR, LIVENESS_FAILED, REPLAY_SUSPECTED, RAPID_ATTEMPTS]
+
+  ReviewAnomalySeverity:
+    type: string
+    description: |
+      How much attention the flag deserves. Assigned by the pipeline at write
+      time, never by a reviewer: replay suspicion and duplicate enrollment are
+      `HIGH`, a plain liveness failure or a rate-limit trip is `MEDIUM`.
+    enum: [LOW, MEDIUM, HIGH]
+
+  ReviewAnomalyUser:
+    type: object
+    description: |
+      The attendant the flag is about, resolved for display. Anomaly rows carry
+      no foreign key (they can outlive the account), so this is joined in at
+      read time.
+    required: [id, firstName, lastName, email]
+    properties:
+      id: { type: integer, examples: [12] }
+      firstName: { type: string, examples: [Alice] }
+      lastName: { type: string, examples: [Wonder] }
+      email: { type: string, format: email, examples: [alice@example.com] }
+
+  ReviewAnomalyEvidence:
+    type: object
+    description: |
+      The frames retained for this specific flagged attempt, plus the scores
+      that produced the verdict. Frames are kept only for attempts that were
+      flagged, and only until their retention window closes, which is why most
+      of what a reviewer sees has no evidence attached.
+    required: [id, frameUrls]
+    properties:
+      id: { type: integer, examples: [88] }
+      frameUrls:
+        type: array
+        description: |
+          Short-lived signed URLs, minted per response. The database stores
+          authenticated asset ids rather than fetchable URLs, so neither a
+          leaked row nor a cached response body grants standing access to
+          somebody's face. Treat these as expiring: re-read the anomaly rather
+          than bookmarking a frame.
+        items: { type: string, format: uri }
+      livenessScore:
+        type: [number, 'null']
+        description: The verifier's confidence that the capture was a live person. Null when the check never produced one.
+        examples: [0.1]
+      matchDistance:
+        type: [number, 'null']
+        description: |
+          Euclidean distance between the captured face and the enrolled
+          template. Lower is a closer match, so a large value alongside a
+          `LIVENESS_FAILED` flag points at a different person rather than a bad
+          capture.
+        examples: [0.92]
+
+  ReviewAnomaly:
+    type: object
+    description: |
+      One flagged attempt, enriched with everything a reviewer needs to judge it
+      without a second request: who it was about, which event, and the frames if
+      any survive.
+    required: [id, type, severity, createdAt]
+    properties:
+      id: { type: integer, examples: [140] }
+      type: { $ref: '#/components/schemas/ReviewAnomalyType' }
+      severity: { $ref: '#/components/schemas/ReviewAnomalySeverity' }
+      detail:
+        type: [object, 'null']
+        additionalProperties: true
+        description: |
+          Free-form context, shaped by the flag type: the liveness reasons and
+          failed actions for a failed scan, the id of the colliding account for
+          a duplicate descriptor, the throttled route for rapid attempts. It is
+          for a human reading the queue, so do not branch on its keys.
+        examples:
+          - reasons: [identity_mismatch]
+            action: CHECK_IN
+      eventId:
+        type: [integer, 'null']
+        description: |
+          Null for flags raised outside an event, which is the case for a
+          duplicate descriptor caught during enrollment.
+        examples: [3]
+      createdAt:
+        type: string
+        format: date-time
+        description: When the attempt was flagged. Rows are returned newest first.
+      resolvedAt:
+        type: [string, 'null']
+        format: date-time
+        description: Null while the flag is still open. Set when an administrator marks it reviewed.
+      user:
+        description: |
+          Null when the attendant has since been soft-deleted, in which case the
+          flag itself is all that survives and a client should fall back to
+          showing the event and the timestamp.
+        oneOf:
+          - $ref: '#/components/schemas/ReviewAnomalyUser'
+          - type: 'null'
+      evidence:
+        description: |
+          Null when no frames were retained for this attempt, or when their
+          retention window has expired and the purge has removed them.
+        oneOf:
+          - $ref: '#/components/schemas/ReviewAnomalyEvidence'
+          - type: 'null'
+
+  ReviewAnomalyListResponse:
+    type: object
+    description: A page of anomaly flags, newest first.
+    required: [message, data, meta]
+    properties:
+      message: { type: string, examples: [Anomaly flags fetched successfully.] }
+      data:
+        type: array
+        items: { $ref: '#/components/schemas/ReviewAnomaly' }
+      meta: { $ref: '#/components/schemas/PaginationMeta' }
+
+  ReviewAuditLogEntry:
+    type: object
+    description: |
+      One append-only record of something that happened. Entries are never
+      updated or rewritten, which is the whole point: an audit trail a later
+      action can edit proves nothing. There is no `updatedAt` on the model for
+      the same reason.
+
+      The actor is polymorphic rather than a foreign key. Administrators and
+      attendants live in separate tables and an entry must survive the deletion
+      of the account it names, so it stores a kind plus an id and resolves
+      nothing at read time.
+    required: [id, actorKind, action, createdAt]
+    properties:
+      id: { type: integer, examples: [903] }
+      actorKind:
+        type: string
+        enum: [ADMIN, USER, SYSTEM]
+        description: Which table `actorId` points into, or `SYSTEM` for background jobs acting on nobody's behalf.
+        examples: [USER]
+      actorId:
+        type: [integer, 'null']
+        description: Null for `SYSTEM` entries, and for actions taken before a principal was established.
+        examples: [12]
+      action:
+        type: string
+        description: |
+          A stable, server-chosen verb such as `CHECK_IN_LIVENESS_FAILED`,
+          `FACE_ENROLL_DUPLICATE`, or `ANOMALY_RESOLVED`. Filter on it exactly.
+        examples: [ANOMALY_RESOLVED]
+      targetType:
+        type: [string, 'null']
+        description: The model name the action was performed on, for example `AnomalyFlag`, `Event`, or `User`.
+        examples: [AnomalyFlag]
+      targetId:
+        type: [integer, 'null']
+        description: The affected row's id within `targetType`.
+        examples: [140]
+      metadata:
+        type: [object, 'null']
+        additionalProperties: true
+        description: |
+          Action-specific context captured at the time, for example the liveness
+          reasons behind a failure or the account a duplicate face matched.
+        examples:
+          - reasons: [identity_mismatch]
+            step: true
+      ip:
+        type: [string, 'null']
+        description: |
+          The caller's address as the server resolved it behind the configured
+          proxy, so an entry can be tied to a location rather than to a load
+          balancer.
+        examples: ['196.61.35.12']
+      createdAt: { type: string, format: date-time }
+
+  ReviewAuditLogListResponse:
+    type: object
+    description: A page of audit entries, newest first.
+    required: [message, data, meta]
+    properties:
+      message: { type: string, examples: [Audit log fetched successfully.] }
+      data:
+        type: array
+        items: { $ref: '#/components/schemas/ReviewAuditLogEntry' }
+      meta: { $ref: '#/components/schemas/PaginationMeta' }

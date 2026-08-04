@@ -17,6 +17,7 @@
     "worker:dev": "node --env-file .env worker.js",
     "worker": "node worker.js",
     "studio": "node --env-file .env ./node_modules/.bin/prisma studio",
+    "docs:check": "node scripts/check-openapi.js",
     "test": "vitest run",
     "test:coverage": "vitest run --coverage",
     "lint": "eslint ."
@@ -54,10 +55,13 @@
     "pino-http": "^11.0.0",
     "pino-pretty": "^13.1.2",
     "prisma": "^7.8.0",
-    "rate-limit-redis": "^6.0.0"
+    "rate-limit-redis": "^6.0.0",
+    "swagger-ui-express": "^5.0.1",
+    "yaml": "^2.9.0"
   },
   "devDependencies": {
     "@eslint/js": "^9.39.0",
+    "@readme/openapi-parser": "^7.0.0",
     "@vitest/coverage-v8": "^4.1.10",
     "eslint": "^9.39.0",
     "globals": "^16.5.0",

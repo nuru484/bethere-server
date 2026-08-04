@@ -34,6 +34,7 @@ Cookie-only **JWT** access + refresh tokens with **refresh-token rotation and re
 
 ## 📚 Table of Contents
 
+* [API Reference](#-api-reference)
 * [Features](#-features)
 * [Tech Stack](#-tech-stack)
 * [Architecture Overview](#-architecture-overview)
@@ -45,6 +46,27 @@ Cookie-only **JWT** access + refresh tokens with **refresh-token rotation and re
 * [Deployment](#-deployment)
 * [Contributing](#-contributing)
 * [License](#-license)
+
+---
+
+## 📖 API Reference
+
+Interactive docs for every endpoint: **[api.bethere.manuru.dev/api/docs](https://api.bethere.manuru.dev/api/docs)**
+
+The raw OpenAPI 3.1 document is at `/api/docs.json`, so you can import the whole
+API into Postman or Insomnia, or point a client generator at it.
+
+**Trying it out.** Auth is an httpOnly cookie, not a bearer token, so there is
+nothing to paste into the Authorize dialog. Call `POST /api/v1/auth/demo-login`
+with `{"role": "ADMIN"}` from the docs page itself: the browser stores the
+session cookie and every other endpoint becomes callable.
+
+**How the spec is maintained.** It lives in `docs/openapi/`, split one file per
+domain under `paths/` and `components/`, and is assembled at boot by
+`src/docs/openapi.js`. Because hand-written docs rot, `npm run docs:check`
+validates the document and diffs it against the routes Express actually mounts;
+CI fails on an endpoint that ships without documentation or a documented path
+that no longer exists.
 
 ---
 

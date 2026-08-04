@@ -1,0 +1,261 @@
+# Account management for both principal kinds.
+#
+# Attendants (`USER`) and administrators (`ADMIN`) live in separate tables but
+# share one account shape, so the request bodies below are written once and
+# reused across the `/users` and `/admins` surfaces: the client switches
+# endpoint by role and keeps the same forms. Responses reuse `AttendantAccount`
+# and `AdminAccount` from the auth components rather than restating them, which
+# is what guarantees the two surfaces cannot drift apart.
+
+parameters:
+  UserIdPath:
+    name: userId
+    in: path
+    required: true
+    description: |
+      The attendant's id. Ids are only unique within the attendant table, so
+      the same number also identifies a different administrator on the
+      `/admins` surface.
+    schema:
+      type: integer
+      minimum: 1
+
+  AdminIdPath:
+    name: adminId
+    in: path
+    required: true
+    description: |
+      The administrator's id, unique within the administrator table only.
+    schema:
+      type: integer
+      minimum: 1
+
+schemas:
+  UserPassword:
+    type: string
+    format: password
+    minLength: 8
+    maxLength: 255
+    description: |
+      The single password policy, applied at every surface that sets a
+      password so none of them can drift: at least 8 characters containing an
+      uppercase letter, a lowercase letter, and a digit.
+
+      Password fields are the one input never trimmed or HTML-escaped. Escaping
+      would alter the credential before hashing, so a password containing
+      `& < > ' "` would stop matching at login.
+    examples: ['NewStrongPass123!']
+
+  UserNameField:
+    type: string
+    minLength: 2
+    maxLength: 100
+    description: |
+      Trimmed and HTML-escaped on the way in, so a name is safe to render
+      anywhere without further encoding. The escaping is stored, which is why a
+      name such as `O'Brien` reads back as `O&#x27;Brien`.
+    examples: [Amina]
+
+  UserCreateRequest:
+    type: object
+    description: |
+      Creates an attendant. There is deliberately no password field: attendants
+      are created passwordless and sign in with a one-time code, so an
+      administrator never chooses, sees, or has to communicate a colleague's
+      credential. Sending `password` is rejected as a validation failure rather
+      than quietly ignored, so a client written against the wrong contract
+      fails loudly instead of assuming a password was set.
+
+      There is no `role` field either. Every row in this table is an attendant;
+      staff are created through `POST /api/v1/admins`.
+    required: [firstName, lastName, email]
+    properties:
+      firstName: { $ref: '#/components/schemas/UserNameField' }
+      lastName:
+        allOf:
+          - $ref: '#/components/schemas/UserNameField'
+        examples: [Yakubu]
+      email:
+        type: string
+        format: email
+        description: |
+          Normalized before storage, and checked against BOTH principal tables:
+          login resolves administrators first, so an email shared with an
+          administrator would permanently shadow this attendant at sign-in. The
+          check bypasses the soft-delete scope on purpose, so a removed
+          account still reserves its address.
+        examples: [amina@example.com]
+      phone:
+        type: [string, 'null']
+        description: |
+          Optional, and unique within the attendant table when present. It is
+          also a login identifier for the one-time code flow, which is why it
+          cannot be shared.
+        examples: ['+233201234567']
+
+  AdminCreateRequest:
+    type: object
+    description: |
+      Creates an administrator. Unlike attendant creation this one requires a
+      password: staff sign in with a password plus optional two-factor, and
+      there is no one-time code path onto the admin surface.
+
+      The new administrator has the same powers as the creator. There is no
+      privilege tier, so this endpoint is the whole trust boundary.
+    required: [firstName, lastName, email, password]
+    properties:
+      firstName: { $ref: '#/components/schemas/UserNameField' }
+      lastName:
+        allOf:
+          - $ref: '#/components/schemas/UserNameField'
+        examples: [Yakubu]
+      email:
+        type: string
+        format: email
+        description: |
+          Checked against both principal tables, for the same reason attendant
+          creation is: one address can only ever resolve to one account.
+        examples: [ops@example.com]
+      password: { $ref: '#/components/schemas/UserPassword' }
+      phone:
+        type: [string, 'null']
+        description: Optional, and unique within the administrator table when present.
+        examples: ['+233201234567']
+
+  UserProfileUpdateRequest:
+    type: object
+    description: |
+      A partial profile edit, used by both `PUT /api/v1/users/{userId}` and
+      `PUT /api/v1/admins/{adminId}`: the editable fields are identical for the
+      two principal kinds, so one contract covers both.
+
+      Only the properties actually present are written. An omitted field is
+      left alone rather than nulled, so a client can send just the field the
+      user touched. Nothing here can change a role, a password, or a biometric
+      enrollment: those have their own endpoints.
+    properties:
+      firstName: { $ref: '#/components/schemas/UserNameField' }
+      lastName:
+        allOf:
+          - $ref: '#/components/schemas/UserNameField'
+        examples: [Yakubu]
+      email:
+        type: string
+        format: email
+        description: |
+          Re-checked for uniqueness across both tables, but only when it
+          actually differs from the current value, so resubmitting an unchanged
+          profile never collides with the account's own address.
+        examples: [amina@example.com]
+      phone:
+        type: [string, 'null']
+        description: |
+          Re-checked for uniqueness within the account's own table, and again
+          only when it differs from the stored value.
+        examples: ['+233201234567']
+
+  UserChangePasswordRequest:
+    type: object
+    description: |
+      An attendant setting or changing their own password.
+
+      `currentPassword` is optional in the schema because an attendant created
+      by an administrator has no password yet and sets their first one with
+      nothing to prove. The service, not the validator, decides which case
+      applies: an account that already has a password must supply the correct
+      current one no matter what the client sends, so the optionality can never
+      be used to bypass the check. Clients read `hasPassword` on the account to
+      know whether to render the current-password field.
+    required: [newPassword]
+    properties:
+      currentPassword:
+        type: string
+        format: password
+        description: |
+          Required whenever the account already has a password. It must differ
+          from `newPassword`.
+        examples: [Passw0rd!]
+      newPassword: { $ref: '#/components/schemas/UserPassword' }
+
+  AdminChangePasswordRequest:
+    type: object
+    description: |
+      An administrator changing their own password. `currentPassword` is
+      mandatory here because an administrator always has one, so there is no
+      first-password case to accommodate. It is enforced twice, in the
+      validator and again in the service, so removing either layer cannot open
+      a path to setting a password without proving the current identity.
+    required: [currentPassword, newPassword]
+    properties:
+      currentPassword:
+        type: string
+        format: password
+        description: Must be correct, and must differ from `newPassword`.
+        examples: [Passw0rd!]
+      newPassword: { $ref: '#/components/schemas/UserPassword' }
+
+  UserProfilePictureUpload:
+    type: object
+    description: |
+      The multipart body for a profile-picture replacement. One file, in the
+      field named `profilePicture`.
+    required: [profilePicture]
+    properties:
+      profilePicture:
+        type: string
+        format: binary
+        description: |
+          A JPEG, PNG, WEBP, HEIC or HEIF image, up to 5 MB. The declared
+          mimetype is only the first gate: the first bytes of the upload are
+          checked against the real image signatures, so a script renamed to
+          `.jpg` and labeled `image/jpeg` is still rejected before it reaches
+          Cloudinary.
+
+  UserResponse:
+    type: object
+    description: A single attendant account.
+    required: [message, data]
+    properties:
+      message: { type: string, examples: [User fetched successfully.] }
+      data: { $ref: '#/components/schemas/AttendantAccount' }
+
+  UserListResponse:
+    type: object
+    description: |
+      A page of attendant accounts, newest first. The biometric descriptor is
+      never included: rows carry `hasFaceScan` so a client can show enrollment
+      state without the raw template ever being sent in bulk.
+    required: [message, data, meta]
+    properties:
+      message:
+        type: string
+        description: |
+          Switches to an empty-state sentence when the page has no rows, so the
+          client does not have to compose one.
+        examples: [Users successfully fetched.]
+      data:
+        type: array
+        items: { $ref: '#/components/schemas/AttendantAccount' }
+      meta: { $ref: '#/components/schemas/PaginationMeta' }
+
+  AdminResponse:
+    type: object
+    description: A single administrator account.
+    required: [message, data]
+    properties:
+      message: { type: string, examples: [Admin fetched successfully.] }
+      data: { $ref: '#/components/schemas/AdminAccount' }
+
+  AdminListResponse:
+    type: object
+    description: |
+      A page of administrator accounts, newest first. Unlike the attendant list
+      this one has no search filter: the administrator roster is small enough
+      that paging through it is the whole interaction.
+    required: [message, data, meta]
+    properties:
+      message: { type: string, examples: [Admins successfully fetched.] }
+      data:
+        type: array
+        items: { $ref: '#/components/schemas/AdminAccount' }
+      meta: { $ref: '#/components/schemas/PaginationMeta' }

@@ -1,0 +1,535 @@
+# Attendance domain components.
+#
+# Marking attendance requires TWO independent proofs in one flow: the rotating
+# venue code proves the person is AT the location, and the server-side live face
+# check proves they are WHO they claim. Neither is decided by the client, so a
+# patched app cannot forge either one. These schemas describe the wire shapes of
+# that flow and of the three attendance-listing surfaces.
+
+schemas:
+  AttendanceRecordStatus:
+    type: string
+    description: |
+      How the check-in was classified. `PRESENT` for a check-in inside the
+      first hour of the session, `LATE` for one after it, and `ABSENT` for a
+      row the session finalizer wrote for someone who never checked in at all.
+      `ABSENT` therefore only ever appears on a list, never as the result of a
+      check-in.
+    enum: [PRESENT, LATE, ABSENT]
+
+  AttendanceLivenessAction:
+    type: string
+    description: |
+      One prompted action in a liveness challenge. The server draws three of
+      these without repetition per challenge, and the client learns which ones
+      only after the draw, which is what makes a pre-recorded capture useless:
+      it cannot contain actions that were chosen after it was recorded.
+
+      Each maps to something the face engine can prove from the frames rather
+      than take on trust. A blink is a transition (eyes open, closed, open
+      again) that a still photograph cannot hold, and every possible draw
+      contains either a blink or a two-turn reversal for exactly that reason.
+    enum: [TURN_LEFT, TURN_RIGHT, BLINK, SMILE]
+
+  AttendanceMode:
+    type: string
+    description: |
+      Which direction the challenge is for. The value is bound into the signed
+      challenge token, so a challenge minted for a check-in can never be
+      replayed to drive a check-out or the reverse. Omitted means `in`.
+    enum: [in, out]
+    default: in
+
+  AttendanceVenueCode:
+    type: string
+    pattern: '^[0-9a-f]{16}$'
+    description: |
+      The rotating code displayed at the venue, scanned by the attendant. It is
+      a truncated keyed hash of the event's server-side secret and the current
+      30-second time window, so it is stateless: nothing polls or writes the
+      database to rotate it, and validating a scan just recomputes the window's
+      expected value and compares in constant time.
+
+      Sixteen hex characters is 64 bits, unguessable inside a 30-second window
+      and still small enough to render as a crisp QR code. The secret that
+      mints it is stripped from every query result and never reaches a client,
+      so codes cannot be generated off-site.
+
+      Request validation only checks that a non-empty string was sent. A
+      wrong-shaped or stale value is not a validation failure: it comes back as
+      the same 400 as a code from the wrong venue, so this endpoint cannot be
+      used to probe the code format.
+    examples: ['9f2c4b7e1a6d5038']
+
+  AttendanceChallengeToken:
+    type: string
+    description: |
+      The signed, short-lived token returned by a challenge endpoint and sent
+      back with the captured frames. It carries the actor, the event, the
+      direction, a purpose tag, and a nonce, and the authoritative action list
+      lives in the matching database row rather than in the token, so a client
+      that rewrites its copy of the actions changes nothing.
+
+      Batch and guided tokens carry different purpose tags, so a guided step
+      token cannot be posted to the single-shot endpoint or the reverse. Both
+      are single-use: exchanging one consumes its row in a guarded atomic
+      update, and a replay loses that race and is rejected.
+    examples: ['eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJ1c2VySWQiOjEyfQ.s1gnatur3']
+
+  AttendanceChallengeRequest:
+    type: object
+    description: |
+      Opens a check-in or check-out attempt. Presence is proven here, at the
+      moment the code is scanned, with the tight one-window tolerance, and
+      everything cheap is checked before any machine learning is spent: the
+      code, the enrollment, the consent version, the session window, and
+      whether this attendant has already checked in or out.
+    required: [venueCode]
+    properties:
+      venueCode: { $ref: '#/components/schemas/AttendanceVenueCode' }
+      mode: { $ref: '#/components/schemas/AttendanceMode' }
+
+  AttendanceChallenge:
+    type: object
+    description: |
+      A single-use liveness challenge for the single-shot flow. The client
+      prompts the user through `actions` in order, records one continuous
+      burst, and uploads it with the token.
+    required: [actions, challengeToken, expiresAt]
+    properties:
+      actions:
+        type: array
+        minItems: 3
+        maxItems: 3
+        description: |
+          The three drawn actions, in the order they must be performed. Order
+          is part of the proof: the frames are checked for the actions firing
+          in this sequence, not merely for all three appearing somewhere.
+        items: { $ref: '#/components/schemas/AttendanceLivenessAction' }
+        examples: [[BLINK, TURN_LEFT, SMILE]]
+      challengeToken: { $ref: '#/components/schemas/AttendanceChallengeToken' }
+      expiresAt:
+        type: string
+        format: date-time
+        description: |
+          60 seconds after issue. Deliberately short: this lifetime is the
+          dominant term in how long a scanned venue code stays acceptable at
+          upload, so a longer challenge would widen the window in which a
+          photographed code could be relayed off-site and used from anywhere.
+
+  AttendanceChallengeResponse:
+    type: object
+    required: [message, data]
+    properties:
+      message:
+        type: string
+        examples: [Liveness challenge issued. Follow the on-screen actions.]
+      data: { $ref: '#/components/schemas/AttendanceChallenge' }
+
+  AttendanceStepChallenge:
+    type: object
+    description: |
+      A single-use liveness challenge for the guided flow. Same draw as the
+      single-shot challenge, but the client is told one action at a time and
+      the server verifies each before naming the next, so the user gets an
+      immediate retry on the action they actually fumbled instead of failing a
+      whole capture and starting over.
+    required: [actions, challengeToken, currentStep, nextAction, totalSteps, expiresAt]
+    properties:
+      actions:
+        type: array
+        minItems: 3
+        maxItems: 3
+        description: |
+          The full drawn sequence, returned so the client can render progress.
+          It is advisory: the server holds the authoritative copy and decides
+          which step is being proven, so nothing the client does with this list
+          can reorder or skip a step.
+        items: { $ref: '#/components/schemas/AttendanceLivenessAction' }
+        examples: [[SMILE, BLINK, TURN_RIGHT]]
+      challengeToken: { $ref: '#/components/schemas/AttendanceChallengeToken' }
+      currentStep:
+        type: integer
+        minimum: 0
+        description: Index of the action to prove next. Always 0 on a fresh challenge.
+        examples: [0]
+      nextAction:
+        allOf:
+          - $ref: '#/components/schemas/AttendanceLivenessAction'
+        description: The action to prompt for right now, equal to `actions[currentStep]`.
+      totalSteps:
+        type: integer
+        description: How many actions must be proven before the record is written.
+        examples: [3]
+      expiresAt:
+        type: string
+        format: date-time
+        description: |
+          Five minutes after issue, longer than a single-shot challenge because
+          the guided flow spans several verified round-trips. The wider window
+          costs nothing: presence is re-proven at the final commit and the
+          challenge is single-use, so it cannot be relayed and reused.
+
+  AttendanceStepChallengeResponse:
+    type: object
+    required: [message, data]
+    properties:
+      message:
+        type: string
+        examples: [Step-by-step scan started. Perform the first action.]
+      data: { $ref: '#/components/schemas/AttendanceStepChallenge' }
+
+  AttendanceCaptureUpload:
+    type: object
+    description: |
+      The single-shot capture: one burst of frames proving all three actions,
+      plus the challenge token and a re-sent venue code.
+
+      The venue code is re-checked here and not only at the challenge, because
+      checking it once let a code be photographed, relayed off-site, and the
+      frames uploaded from anywhere for the life of the challenge. Requiring a
+      still-acceptable code at upload keeps the proof of presence attached to
+      the proof of identity. The tolerance is widened to roughly three minutes
+      of rotations here, so a user who scanned near the end of a 30-second
+      window is not told the code expired while they were performing the
+      actions they were just asked to perform.
+    required: [challengeToken, venueCode, frames]
+    properties:
+      challengeToken: { $ref: '#/components/schemas/AttendanceChallengeToken' }
+      venueCode: { $ref: '#/components/schemas/AttendanceVenueCode' }
+      frames:
+        type: array
+        minItems: 6
+        maxItems: 16
+        description: |
+          Between 6 and 16 captured image frames, in capture order, each at
+          most 1.5 MB. The ceiling is not just a size limit: 16 frames at the
+          general 5 MB image cap would let one check-in buffer 80 MB in memory,
+          and client-compressed JPEGs are far smaller than 1.5 MB anyway.
+
+          JPEG, PNG, WEBP, HEIC, and HEIF are accepted, and the declared
+          multipart mimetype is not trusted: every buffer is checked against
+          real image magic numbers before it reaches the face engine.
+        items:
+          type: string
+          format: binary
+
+  AttendanceStepCaptureUpload:
+    type: object
+    description: |
+      One step of the guided capture: a dense burst covering a single action.
+      The client never says which step it is submitting, because the server
+      holds that and would not believe it anyway.
+    required: [challengeToken, venueCode, frames]
+    properties:
+      challengeToken: { $ref: '#/components/schemas/AttendanceChallengeToken' }
+      venueCode:
+        allOf:
+          - $ref: '#/components/schemas/AttendanceVenueCode'
+        description: |
+          Required on every step, but only re-validated at the final one, where
+          the record is actually written. Anchoring presence to the moment of
+          the write is what stops a relayed code from ever producing a row, and
+          the intermediate steps are already authenticated by the step token.
+      frames:
+        type: array
+        minItems: 4
+        maxItems: 20
+        description: |
+          Between 4 and 20 frames for this one action, each at most 1.5 MB.
+          Fewer than a single-shot burst because one action is being proven
+          rather than three, but sampled fast enough to catch a blink that
+          lasts around 200 milliseconds. Same formats and same magic-number
+          check as the single-shot upload.
+        items:
+          type: string
+          format: binary
+
+  AttendanceUserSummary:
+    type: object
+    description: |
+      The minimal attendant identity attached to a check-in or check-out
+      result. Nothing biometric is ever included: the enrolled template is not
+      returned by any endpoint in this API.
+    required: [id, firstName, lastName, email]
+    properties:
+      id: { type: integer, examples: [12] }
+      firstName: { type: string, examples: [Amina] }
+      lastName: { type: string, examples: [Yakubu] }
+      email: { type: string, format: email, examples: [amina@example.com] }
+
+  AttendanceListUserSummary:
+    description: |
+      The attendant identity on a list row. Adds the avatar, because list
+      surfaces render a roster and the mutation responses do not.
+    allOf:
+      - $ref: '#/components/schemas/AttendanceUserSummary'
+      - type: object
+        properties:
+          profilePicture:
+            type: [string, 'null']
+            format: uri
+            description: Cloudinary URL, or null if none has been uploaded.
+
+  AttendanceLocationSummary:
+    type: object
+    description: The venue an event is held at. Present on list rows only.
+    required: [id, name]
+    properties:
+      id: { type: integer, examples: [3] }
+      name: { type: string, examples: [Main Auditorium] }
+      city: { type: [string, 'null'], examples: [Tamale] }
+      country: { type: [string, 'null'], examples: [Ghana] }
+      createdAt: { type: string, format: date-time }
+      updatedAt: { type: string, format: date-time }
+
+  AttendanceEventSummary:
+    type: object
+    description: |
+      The event a session belongs to, embedded so a client can label a row
+      without a second request.
+
+      `venueSecret` is absent by construction, not by omission here: it is
+      stripped from every query result at the database-client level, including
+      events nested this deeply, because anyone holding it could mint valid
+      venue codes off-site and defeat the presence proof entirely.
+    required: [id, title, startDate, startTime, endTime, type, locationId]
+    properties:
+      id: { type: integer, examples: [7] }
+      title: { type: string, examples: [Weekly Standup] }
+      description: { type: [string, 'null'] }
+      type: { type: string, examples: [MEETING] }
+      startDate: { type: string, format: date-time }
+      endDate: { type: [string, 'null'], format: date-time }
+      startTime:
+        type: string
+        description: |
+          Local wall-clock time attendance opens, as `HH:MM`. It is a string,
+          not a timestamp, because it repeats every occurrence of a recurring
+          event.
+        examples: ['06:00']
+      endTime:
+        type: string
+        description: Local wall-clock time attendance closes, as `HH:MM`.
+        examples: ['19:30']
+      isRecurring: { type: boolean, examples: [true] }
+      recurrenceInterval: { type: integer, examples: [7] }
+      durationDays: { type: integer, examples: [1] }
+      archived: { type: boolean, examples: [false] }
+      coverImage: { type: [string, 'null'], format: uri }
+      locationId: { type: integer, examples: [3] }
+      location:
+        description: |
+          Only present on the list surfaces. The check-in and check-out
+          responses embed the event without its location.
+        allOf:
+          - $ref: '#/components/schemas/AttendanceLocationSummary'
+      deletedAt:
+        type: [string, 'null']
+        format: date-time
+        description: |
+          Soft-delete marker. A deleted event disappears from event lists but
+          its sessions and attendance history stay queryable, so historic
+          reports do not develop holes when an event is removed.
+      createdAt: { type: string, format: date-time }
+      updatedAt: { type: string, format: date-time }
+
+  AttendanceSessionSummary:
+    type: object
+    description: |
+      The single occurrence the attendance belongs to. Attendance hangs off a
+      session rather than an event, which is what makes one row per occurrence
+      of a recurring event possible.
+    required: [id, eventId, startDate, endDate]
+    properties:
+      id: { type: integer, examples: [41] }
+      eventId: { type: integer, examples: [7] }
+      startDate: { type: string, format: date-time }
+      endDate: { type: string, format: date-time }
+      startTime: { type: string, format: date-time }
+      endTime: { type: string, format: date-time }
+      finalizedAt:
+        type: [string, 'null']
+        format: date-time
+        description: |
+          When the finalizer closed the books on this session, writing `ABSENT`
+          rows and auto-checking-out anyone still open. Null until then. It
+          runs on a delay after the session ends so a check-out racing the
+          deadline is never overwritten.
+      event: { $ref: '#/components/schemas/AttendanceEventSummary' }
+      createdAt: { type: string, format: date-time }
+      updatedAt: { type: string, format: date-time }
+
+  AttendanceRecord:
+    type: object
+    description: |
+      One attendant's attendance for one session, as returned by a successful
+      check-in or check-out. The row and its audit-log entry are written in the
+      same transaction: a recorded check-in without its trail would defeat the
+      point of an audit product, so a crash mid-sequence rolls back both.
+    required: [id, status, userId, sessionId, autoCheckedOut, createdAt, updatedAt]
+    properties:
+      id: { type: integer, examples: [901] }
+      status: { $ref: '#/components/schemas/AttendanceRecordStatus' }
+      userId: { type: integer, examples: [12] }
+      sessionId: { type: integer, examples: [41] }
+      checkInTime:
+        type: [string, 'null']
+        format: date-time
+        description: |
+          When the check-in was verified, stamped server-side. Null only on an
+          `ABSENT` row, which the finalizer writes for someone who never
+          checked in.
+      checkOutTime:
+        type: [string, 'null']
+        format: date-time
+        description: Null until the attendant checks out or the finalizer closes the session.
+      autoCheckedOut:
+        type: boolean
+        description: |
+          True when the finalizer stamped the check-out because the attendant
+          never signed out. It distinguishes an administrative close from a
+          real face-verified check-out, so the two are never confused in a
+          report.
+        examples: [false]
+      user: { $ref: '#/components/schemas/AttendanceUserSummary' }
+      session: { $ref: '#/components/schemas/AttendanceSessionSummary' }
+      createdAt: { type: string, format: date-time }
+      updatedAt: { type: string, format: date-time }
+
+  AttendanceListItem:
+    description: |
+      One row of an attendance list. Same record as a check-in result, with a
+      slightly richer embedding: the attendant carries their avatar and the
+      event carries its location, because these are the surfaces that render a
+      roster.
+    allOf:
+      - $ref: '#/components/schemas/AttendanceRecord'
+      - type: object
+        properties:
+          user: { $ref: '#/components/schemas/AttendanceListUserSummary' }
+
+  AttendanceRecordResponse:
+    type: object
+    description: The envelope for a completed check-in or check-out.
+    required: [message, data]
+    properties:
+      message:
+        type: string
+        examples: [Attendance marked successfully as PRESENT.]
+      data: { $ref: '#/components/schemas/AttendanceRecord' }
+
+  AttendanceStepProgress:
+    type: object
+    description: |
+      A verified action that was not the last one. The user is prompted for
+      `nextAction` and the flow continues on the same challenge token.
+
+      A failed step does NOT appear here: it is rejected outright, and it does
+      not advance the challenge, so the user is shown the same action again
+      rather than losing the whole scan over one fumbled prompt.
+    required: [done, currentStep, nextAction, totalSteps]
+    properties:
+      done:
+        type: boolean
+        const: false
+      currentStep:
+        type: integer
+        minimum: 1
+        description: |
+          The index of the action to prove next, already advanced past the one
+          just verified. Advancement is an atomic guarded update, so a
+          duplicated or out-of-order submit of the same step loses the race and
+          is rejected instead of being double-counted.
+        examples: [1]
+      nextAction:
+        allOf:
+          - $ref: '#/components/schemas/AttendanceLivenessAction'
+        description: The action to prompt for now.
+      totalSteps:
+        type: integer
+        examples: [3]
+
+  AttendanceStepComplete:
+    type: object
+    description: |
+      The final action verified and the attendance committed. This is the only
+      shape that carries a record, and the challenge is consumed at the same
+      moment, so the token cannot be used again.
+    required: [done, attendance]
+    properties:
+      done:
+        type: boolean
+        const: true
+      attendance: { $ref: '#/components/schemas/AttendanceRecord' }
+
+  AttendanceStepProgressResponse:
+    type: object
+    description: The envelope for a guided step that verified but did not finish the flow.
+    required: [message, data]
+    properties:
+      message:
+        type: string
+        examples: [Action verified. Perform the next action.]
+      data: { $ref: '#/components/schemas/AttendanceStepProgress' }
+
+  AttendanceStepCompleteResponse:
+    type: object
+    description: The envelope for the guided step that finished the flow.
+    required: [message, data]
+    properties:
+      message:
+        type: string
+        examples: [Attendance marked successfully as PRESENT.]
+      data: { $ref: '#/components/schemas/AttendanceStepComplete' }
+
+  AttendanceListResponse:
+    type: object
+    description: |
+      A page of attendance rows. Ordered by check-in time, newest first, with
+      the rows that have no check-in time at all pushed to the end rather than
+      floating to the top of every list.
+    required: [message, data, meta]
+    properties:
+      message:
+        type: string
+        description: |
+          Switches to the endpoint's empty-state wording when the page has no
+          rows, so a client can show a sensible message without composing one.
+        examples: [User attendance successfully fetched.]
+      data:
+        type: array
+        items: { $ref: '#/components/schemas/AttendanceListItem' }
+      meta: { $ref: '#/components/schemas/PaginationMeta' }
+
+parameters:
+  AttendanceStatusFilter:
+    name: status
+    in: query
+    required: false
+    description: |
+      Restrict to one classification. Case-insensitive, but it must be one of
+      the three known values: anything else is a clean 400 rather than a
+      database error, and an array value such as `?status[]=a&status[]=b` is
+      rejected the same way instead of reaching the query builder.
+    schema: { $ref: '#/components/schemas/AttendanceRecordStatus' }
+
+  AttendanceEventTypeFilter:
+    name: eventType
+    in: query
+    required: false
+    description: Restrict to attendance at events of one type. Exact match.
+    schema:
+      type: string
+      examples: [MEETING]
+
+  AttendanceSessionIdFilter:
+    name: sessionId
+    in: query
+    required: false
+    description: |
+      Restrict to a single occurrence of the event. Optional on the event list,
+      where a purely numeric `search` term already matches a session id.
+    schema:
+      type: integer
+      minimum: 1

@@ -1,0 +1,361 @@
+# Shared building blocks: security schemes, the error and pagination
+# envelopes, reusable query parameters, and the canned error responses that
+# every operation references instead of restating.
+
+securitySchemes:
+  sessionCookie:
+    type: apiKey
+    in: cookie
+    name: bethere_accessToken
+    description: |
+      The session cookie set by any successful login. It is httpOnly, so
+      JavaScript cannot read or set it and there is nothing to paste into the
+      Authorize dialog. Call `POST /api/v1/auth/demo-login` from this page and
+      the browser will hold the cookie for every subsequent request.
+
+  refreshCookie:
+    type: apiKey
+    in: cookie
+    name: bethere_refreshToken
+    description: |
+      The rotating refresh cookie, sent only to `POST /api/v1/refreshToken`.
+      Each refresh consumes its token id and issues a new pair; replaying a
+      consumed token is treated as theft and invalidates the whole family by
+      bumping the principal's token version.
+
+  twoFactorPendingCookie:
+    type: apiKey
+    in: cookie
+    name: bethere_twoFaPending
+    description: |
+      A five-minute, purpose-tagged cookie issued when a password login needs a
+      second factor. It carries no session authority: it authorizes exactly one
+      call to `POST /api/v1/auth/login/2fa` and nothing else.
+
+  handoffToken:
+    type: http
+    scheme: bearer
+    description: |
+      A scoped, short-lived token minted by `POST /api/v1/pairing` and carried
+      by the phone that scanned the pairing code. It is bound to one pairing
+      id, one scope (attendance or enrollment) and, for attendance, one event
+      and direction. It cannot be used on any endpoint outside
+      `/api/v1/pairing/session/*`.
+
+schemas:
+  Error:
+    type: object
+    description: The single error shape returned by every failing endpoint.
+    required: [status, message, requestId]
+    properties:
+      status:
+        type: string
+        const: error
+      message:
+        type: string
+        description: |
+          Human-readable summary. In production a 500 is always reported as
+          `Internal Server Error` so internal detail never reaches a client.
+        examples: [Validation Error]
+      requestId:
+        type: string
+        format: uuid
+        description: |
+          Correlates this response with the access log and error log entries
+          for the same request. Also returned in the `X-Request-Id` header.
+      code:
+        type: string
+        description: |
+          Stable machine-readable classifier. Present whenever the raised error
+          carries one, in every environment, because clients branch on it: a
+          `TOKEN_EXPIRED` should trigger a silent refresh while an
+          `INVALID_TOKEN` should force a logout.
+        examples: [VALIDATION_ERROR]
+      details:
+        type: object
+        description: |
+          Returned in production only when `code` is `VALIDATION_ERROR`, in
+          which case it holds the per-field failures. Outside production it is
+          populated for any error carrying context.
+        properties:
+          errors:
+            type: array
+            items: { $ref: '#/components/schemas/FieldError' }
+      errorId:
+        type: string
+        description: Non-production only. Ties the response to a single log record.
+    examples:
+      - status: error
+        message: Validation Error
+        requestId: 3f1c9d2e-5b7a-4c11-9f60-2a8e4d0b7c31
+        code: VALIDATION_ERROR
+        details:
+          errors:
+            - field: email
+              message: Invalid email format
+
+  FieldError:
+    type: object
+    required: [field, message]
+    properties:
+      field:
+        type: string
+        examples: [email]
+      message:
+        type: string
+        examples: [Invalid email format]
+
+  PaginationMeta:
+    type: object
+    description: |
+      The list-response meta block. Identical across every paginated endpoint.
+    required: [total, page, limit, totalPages]
+    properties:
+      total:
+        type: integer
+        minimum: 0
+        description: Rows matching the filter, ignoring pagination.
+        examples: [42]
+      page:
+        type: integer
+        minimum: 1
+        examples: [1]
+      limit:
+        type: integer
+        minimum: 1
+        maximum: 100
+        examples: [10]
+      totalPages:
+        type: integer
+        minimum: 0
+        examples: [5]
+
+  MessageResponse:
+    type: object
+    description: |
+      The reply from action endpoints that have nothing to return. Deletes,
+      password changes, and resolve actions answer with this.
+    required: [message]
+    properties:
+      message:
+        type: string
+        examples: [User deleted successfully]
+
+  PrincipalKind:
+    type: string
+    description: |
+      Which table the principal lives in. Administrators and attendants are
+      separate tables with independent id sequences, so an id alone is
+      ambiguous and `kind` is what disambiguates it.
+    enum: [ADMIN, USER]
+
+  Role:
+    type: string
+    description: |
+      Authorization role. Mirrors `kind`: there is no separate role table, and
+      an attendant can never hold the `ADMIN` role.
+    enum: [ADMIN, USER]
+
+parameters:
+  Page:
+    name: page
+    in: query
+    required: false
+    description: 1-based page number. Values below 1 are clamped to 1 rather than rejected.
+    schema:
+      type: integer
+      minimum: 1
+      default: 1
+
+  Limit:
+    name: limit
+    in: query
+    required: false
+    description: Rows per page. Clamped into the range 1 to 100.
+    schema:
+      type: integer
+      minimum: 1
+      maximum: 100
+      default: 10
+
+  Search:
+    name: search
+    in: query
+    required: false
+    description: Free-text filter. Case-insensitive substring match.
+    schema:
+      type: string
+
+  RangePreset:
+    name: preset
+    in: query
+    required: false
+    description: |
+      Named date range, resolved against the venue's local day rather than the
+      caller's, so "today" means the same thing to an operator abroad as it
+      does to one at the venue.
+
+      Ignored when explicit `startDate` and `endDate` values are supplied. An
+      unrecognized value is a 400 rather than a silent fallback.
+    schema:
+      type: string
+      default: this_month
+      enum:
+        - today
+        - yesterday
+        - this_week
+        - last_7_days
+        - this_month
+        - last_month
+        - last_30_days
+        - this_quarter
+        - last_quarter
+        - this_year
+        - last_year
+        - last_90_days
+
+  StartDate:
+    name: startDate
+    in: query
+    required: false
+    description: |
+      Inclusive lower bound as a calendar day, `YYYY-MM-DD`. Note this is a
+      date, not a timestamp: a full ISO 8601 date-time is rejected. Ranges are
+      whole venue-local days, so a partial day would be meaningless.
+
+      Must be sent together with `endDate`, and the span may not exceed 400
+      days.
+    schema:
+      type: string
+      format: date
+      pattern: '^\d{4}-\d{2}-\d{2}$'
+      examples: ['2026-01-01']
+
+  EndDate:
+    name: endDate
+    in: query
+    required: false
+    description: |
+      Inclusive upper bound as a calendar day, `YYYY-MM-DD`. The whole day is
+      included, so a check-in at 23:59 venue time on this date still counts.
+    schema:
+      type: string
+      format: date
+      pattern: '^\d{4}-\d{2}-\d{2}$'
+      examples: ['2026-01-31']
+
+headers:
+  XRequestId:
+    description: |
+      The correlation id for this request, present on every response. Quote it
+      in a bug report and the exact log lines can be retrieved.
+    schema:
+      type: string
+      format: uuid
+
+responses:
+  ValidationError:
+    description: |
+      The request body failed validation. `details.errors` names every field
+      that failed and why.
+    headers:
+      X-Request-Id: { $ref: '#/components/headers/XRequestId' }
+    content:
+      application/json:
+        schema: { $ref: '#/components/schemas/Error' }
+        example:
+          status: error
+          message: Validation Error
+          requestId: 3f1c9d2e-5b7a-4c11-9f60-2a8e4d0b7c31
+          code: VALIDATION_ERROR
+          details:
+            errors:
+              - field: password
+                message: Password must be at least 8 characters
+
+  BadRequest:
+    description: The request was well-formed but cannot be satisfied in the current state.
+    headers:
+      X-Request-Id: { $ref: '#/components/headers/XRequestId' }
+    content:
+      application/json:
+        schema: { $ref: '#/components/schemas/Error' }
+
+  Unauthorized:
+    description: |
+      No session, or a session that is no longer valid. Distinguish the causes
+      by `code`: `NO_TOKEN`, `INVALID_TOKEN`, `TOKEN_EXPIRED`, or
+      `USER_NOT_FOUND`.
+    headers:
+      X-Request-Id: { $ref: '#/components/headers/XRequestId' }
+    content:
+      application/json:
+        schema: { $ref: '#/components/schemas/Error' }
+        example:
+          status: error
+          message: Access token expired
+          requestId: 3f1c9d2e-5b7a-4c11-9f60-2a8e4d0b7c31
+          code: TOKEN_EXPIRED
+
+  Forbidden:
+    description: |
+      Authenticated, but not permitted. Returned for a role the endpoint does
+      not accept and for acting on another principal's resource. Never used for
+      an expired session, so a client can treat 403 as final.
+    headers:
+      X-Request-Id: { $ref: '#/components/headers/XRequestId' }
+    content:
+      application/json:
+        schema: { $ref: '#/components/schemas/Error' }
+
+  NotFound:
+    description: No such resource, or it has been soft-deleted.
+    headers:
+      X-Request-Id: { $ref: '#/components/headers/XRequestId' }
+    content:
+      application/json:
+        schema: { $ref: '#/components/schemas/Error' }
+
+  Conflict:
+    description: |
+      The write collides with an existing row, typically a unique contact
+      already registered to another principal. `code` is `DUPLICATE_RECORD`.
+    headers:
+      X-Request-Id: { $ref: '#/components/headers/XRequestId' }
+    content:
+      application/json:
+        schema: { $ref: '#/components/schemas/Error' }
+
+  RateLimited:
+    description: |
+      Too many attempts. Credential limiters fail closed, so this is also what
+      is returned when the rate-limit store itself is unreachable.
+    content:
+      application/json:
+        schema: { $ref: '#/components/schemas/Error' }
+        example:
+          status: error
+          message: Too many failed login attempts. Please try again in a few minutes.
+          code: RATE_LIMIT_EXCEEDED
+
+  UploadError:
+    description: |
+      An upload was rejected: a file over its ceiling (5 MB for profile and
+      cover images, 1.5 MB per liveness frame), too many files, or a payload
+      whose magic bytes do not match a supported image type.
+
+      Note this is a 400 rather than the 413 an upload limit would normally
+      suggest. Multer's limit errors are deliberately normalized into the
+      standard error envelope so that clients have one error shape to handle
+      instead of a special case for uploads. Distinguish the causes by `code`:
+      `UPLOAD_ERROR` for a limit, `INVALID_IMAGE` for a content-type mismatch.
+    headers:
+      X-Request-Id: { $ref: '#/components/headers/XRequestId' }
+    content:
+      application/json:
+        schema: { $ref: '#/components/schemas/Error' }
+        example:
+          status: error
+          message: File too large. Maximum size is 5MB.
+          requestId: 3f1c9d2e-5b7a-4c11-9f60-2a8e4d0b7c31
+          code: UPLOAD_ERROR

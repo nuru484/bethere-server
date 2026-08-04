@@ -1,0 +1,1036 @@
+# Dashboard analytics.
+#
+# Two role-separated boards. The attendant slices under /dashboard/users are
+# USER-only and are inherently scoped to the caller's own records, which is why
+# none of them takes a user id: the id comes from the session, so there is no
+# parameter an attendant could tamper with to read someone else's history.
+# The administrator slices under /dashboard/admin are ADMIN-only and are
+# platform-wide.
+#
+# Each widget is its own endpoint. A board therefore fills in progressively and
+# one slow or failing chart never blanks the page, which is the whole reason
+# these are not a single fat aggregate call.
+
+/api/v1/dashboard/users/totals:
+  get:
+    tags: [Dashboard]
+    operationId: getDashboardUserTotals
+    summary: Event and session counts for the attendant landing cards
+    description: |
+      Attendant-only (USER). Administrators receive 403.
+
+      Platform-wide event and session counts, not personal ones. "Active"
+      means a session whose date window covers the venue's today and whose
+      event wall-clock window is open at this instant, computed on the venue
+      calendar rather than the server's, so a host in a different timezone
+      does not see yesterday's sessions counted as live.
+
+      This predates the personal analytics slices and is kept because deployed
+      clients still read it. For anything actually about the signed-in
+      attendant, use `/api/v1/dashboard/users/kpis` and its siblings.
+    responses:
+      '200':
+        description: The counts.
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [message, data]
+              properties:
+                message: { type: string, examples: [Dashboard totals fetched successfully] }
+                data: { $ref: '#/components/schemas/DashboardUserTotals' }
+      '401': { $ref: '#/components/responses/Unauthorized' }
+      '403': { $ref: '#/components/responses/Forbidden' }
+
+/api/v1/dashboard/users/recent-events:
+  get:
+    tags: [Dashboard]
+    operationId: getDashboardRecentEvents
+    summary: The five most recently created events
+    description: |
+      Attendant-only (USER). Administrators receive 403.
+
+      A read-only strip for the attendant landing page, ordered by creation
+      time. The entries carry no ids, because nothing navigates from here; to
+      act on an event, go through the events endpoints.
+
+      Not filtered by whether the attendant can actually attend any of them,
+      and not date-ranged: it answers "what is new on this deployment", which
+      is why it takes no parameters at all.
+    responses:
+      '200':
+        description: Up to five events, newest first.
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [message, data]
+              properties:
+                message: { type: string, examples: [Recent events fetched successfully] }
+                data:
+                  type: array
+                  maxItems: 5
+                  items: { $ref: '#/components/schemas/DashboardRecentEvent' }
+      '401': { $ref: '#/components/responses/Unauthorized' }
+      '403': { $ref: '#/components/responses/Forbidden' }
+
+/api/v1/dashboard/users/attendance-data:
+  get:
+    tags: [Dashboard]
+    operationId: getDashboardUserAttendanceData
+    summary: The signed-in attendant's attendance over a date range
+    description: |
+      Attendant-only (USER). Administrators receive 403. Scoped to the caller's
+      own rows by the session, so there is no user id to pass.
+
+      **Both `startDate` and `endDate` are required here**, unlike the newer
+      slices, and there is no `preset`. Omitting either is a 400, as is a range
+      wider than 400 days.
+
+      Records with no check-in, which is how a no-show is written when the
+      session is finalized, are placed on the day the row was written rather
+      than being dropped for having no arrival time. Without that, absences
+      would silently vanish from a chart that is meant to show them.
+    parameters:
+      - $ref: '#/components/parameters/StartDate'
+      - $ref: '#/components/parameters/EndDate'
+    responses:
+      '200':
+        description: The attendant's own summary and per-day rows.
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [message, data]
+              properties:
+                message: { type: string, examples: [User attendance data fetched successfully] }
+                data: { $ref: '#/components/schemas/DashboardUserAttendanceData' }
+      '400': { $ref: '#/components/responses/DashboardRangeError' }
+      '401': { $ref: '#/components/responses/Unauthorized' }
+      '403': { $ref: '#/components/responses/Forbidden' }
+
+/api/v1/dashboard/users/now-next:
+  get:
+    tags: [Dashboard]
+    operationId: getDashboardUserNowNext
+    summary: What the attendant is in now and what is next
+    description: |
+      Attendant-only (USER). Administrators receive 403. Scoped to the caller's
+      own records by the session.
+
+      The surface that connects the dashboard to the act of checking in: any
+      open check-in the attendant currently holds, the session to act on next,
+      and a `canCheckIn` flag that already accounts for venue time and for
+      whether they are inside a session.
+
+      Takes no range. It is a point-in-time view, and a date filter on "what
+      should I do now" would be meaningless. Everything is anchored to the
+      venue's clock rather than the caller's device, so a phone with a wrong
+      timezone still gets the right answer.
+    responses:
+      '200':
+        description: Current and upcoming state for this attendant.
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [message, data]
+              properties:
+                message: { type: string, examples: [Now/next fetched successfully] }
+                data: { $ref: '#/components/schemas/DashboardUserNowNext' }
+      '401': { $ref: '#/components/responses/Unauthorized' }
+      '403': { $ref: '#/components/responses/Forbidden' }
+
+/api/v1/dashboard/users/kpis:
+  get:
+    tags: [Dashboard]
+    operationId: getDashboardUserKpis
+    summary: The attendant's headline numbers with trends and streak
+    description: |
+      Attendant-only (USER). Administrators receive 403. Scoped to the caller's
+      own records by the session.
+
+      Turnout, punctuality, sessions attended, and the current streak. The
+      first three carry a trend against the immediately preceding window of
+      identical length, so "80%" is reported alongside whether that is an
+      improvement.
+
+      The streak deliberately ignores the range: it counts back from the
+      attendant's most recent session until the first miss, across their whole
+      history. A streak that reset because someone changed a date picker would
+      not be a streak.
+
+      Takes the standard analytics range: either a `preset` or an explicit
+      `startDate` and `endDate` pair, both `YYYY-MM-DD`. Sending none of them
+      resolves `this_month`.
+    parameters:
+      - $ref: '#/components/parameters/RangePreset'
+      - $ref: '#/components/parameters/StartDate'
+      - $ref: '#/components/parameters/EndDate'
+    responses:
+      '200':
+        description: The attendant's KPI row.
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [message, data]
+              properties:
+                message: { type: string, examples: [User KPIs fetched successfully] }
+                data: { $ref: '#/components/schemas/DashboardUserKpis' }
+      '400': { $ref: '#/components/responses/DashboardRangeError' }
+      '401': { $ref: '#/components/responses/Unauthorized' }
+      '403': { $ref: '#/components/responses/Forbidden' }
+
+/api/v1/dashboard/users/attendance-trend:
+  get:
+    tags: [Dashboard]
+    operationId: getDashboardUserAttendanceTrend
+    summary: The attendant's own attendance over time
+    description: |
+      Attendant-only (USER). Administrators receive 403. Scoped to the caller's
+      own records by the session.
+
+      One point per bucket, zero-filled across the whole window so the line
+      never breaks at a quiet stretch. The bucket size is chosen from the
+      window length rather than requested by the client, which is what keeps a
+      year-long range from returning 365 unreadable points.
+
+      Takes the standard analytics range: either a `preset` or an explicit
+      `startDate` and `endDate` pair, both `YYYY-MM-DD`. Sending none of them
+      resolves `this_month`.
+    parameters:
+      - $ref: '#/components/parameters/RangePreset'
+      - $ref: '#/components/parameters/StartDate'
+      - $ref: '#/components/parameters/EndDate'
+    responses:
+      '200':
+        description: The personal time series.
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [message, data]
+              properties:
+                message: { type: string, examples: [Attendance trend fetched successfully] }
+                data: { $ref: '#/components/schemas/DashboardUserAttendanceTrend' }
+      '400': { $ref: '#/components/responses/DashboardRangeError' }
+      '401': { $ref: '#/components/responses/Unauthorized' }
+      '403': { $ref: '#/components/responses/Forbidden' }
+
+/api/v1/dashboard/users/status-breakdown:
+  get:
+    tags: [Dashboard]
+    operationId: getDashboardUserStatusBreakdown
+    summary: The attendant's present, late, and absent split
+    description: |
+      Attendant-only (USER). Administrators receive 403. Scoped to the caller's
+      own records by the session.
+
+      All three segments are returned in a fixed order even when a count is
+      zero, so the donut's colours and legend stay put between refreshes
+      instead of reshuffling as categories appear and disappear.
+
+      Takes the standard analytics range: either a `preset` or an explicit
+      `startDate` and `endDate` pair, both `YYYY-MM-DD`. Sending none of them
+      resolves `this_month`.
+    parameters:
+      - $ref: '#/components/parameters/RangePreset'
+      - $ref: '#/components/parameters/StartDate'
+      - $ref: '#/components/parameters/EndDate'
+    responses:
+      '200':
+        description: The three status segments.
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [message, data]
+              properties:
+                message: { type: string, examples: [Status breakdown fetched successfully] }
+                data: { $ref: '#/components/schemas/DashboardUserStatusBreakdown' }
+      '400': { $ref: '#/components/responses/DashboardRangeError' }
+      '401': { $ref: '#/components/responses/Unauthorized' }
+      '403': { $ref: '#/components/responses/Forbidden' }
+
+/api/v1/dashboard/users/event-breakdown:
+  get:
+    tags: [Dashboard]
+    operationId: getDashboardUserEventBreakdown
+    summary: Which events the attendant actually shows up for
+    description: |
+      Attendant-only (USER). Administrators receive 403. Scoped to the caller's
+      own records by the session.
+
+      Their ten busiest events in the window, each with turnout, the full
+      status split, and a per-event attendance rate. The rate is the point:
+      an overall figure of 70% could be uniform apathy or perfect attendance
+      at one event and none at another, and only this cut tells them apart.
+
+      Events the attendant has no records against in the window are absent
+      rather than returned at zero.
+
+      Takes the standard analytics range: either a `preset` or an explicit
+      `startDate` and `endDate` pair, both `YYYY-MM-DD`. Sending none of them
+      resolves `this_month`.
+    parameters:
+      - $ref: '#/components/parameters/RangePreset'
+      - $ref: '#/components/parameters/StartDate'
+      - $ref: '#/components/parameters/EndDate'
+    responses:
+      '200':
+        description: Up to ten events, busiest first.
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [message, data]
+              properties:
+                message: { type: string, examples: [Event breakdown fetched successfully] }
+                data: { $ref: '#/components/schemas/DashboardUserEventBreakdown' }
+      '400': { $ref: '#/components/responses/DashboardRangeError' }
+      '401': { $ref: '#/components/responses/Unauthorized' }
+      '403': { $ref: '#/components/responses/Forbidden' }
+
+/api/v1/dashboard/users/calendar:
+  get:
+    tags: [Dashboard]
+    operationId: getDashboardUserCalendar
+    summary: Per-day outcomes for the attendant's calendar heatmap
+    description: |
+      Attendant-only (USER). Administrators receive 403. Scoped to the caller's
+      own records by the session.
+
+      One entry per venue day that has records, carrying the day's counts plus
+      the best outcome reached that day. Ranking present above late above
+      absent means a day where someone made one session on time and missed
+      another still reads as a good day, which is the right reading for a
+      consistency graph.
+
+      Days with no records are omitted rather than returned at zero, so a
+      sparse history stays small and the client paints the gaps as blank.
+
+      Takes the standard analytics range: either a `preset` or an explicit
+      `startDate` and `endDate` pair, both `YYYY-MM-DD`. Sending none of them
+      resolves `this_month`.
+    parameters:
+      - $ref: '#/components/parameters/RangePreset'
+      - $ref: '#/components/parameters/StartDate'
+      - $ref: '#/components/parameters/EndDate'
+    responses:
+      '200':
+        description: The days with activity, ascending.
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [message, data]
+              properties:
+                message: { type: string, examples: [Calendar fetched successfully] }
+                data: { $ref: '#/components/schemas/DashboardUserCalendar' }
+      '400': { $ref: '#/components/responses/DashboardRangeError' }
+      '401': { $ref: '#/components/responses/Unauthorized' }
+      '403': { $ref: '#/components/responses/Forbidden' }
+
+/api/v1/dashboard/admin/totals:
+  get:
+    tags: [Dashboard]
+    operationId: getDashboardAdminTotals
+    summary: Roster and event counts for the administrator landing cards
+    description: |
+      Administrator-only (ADMIN). Attendants receive 403.
+
+      `totalUsers` counts attendant accounts only. Administrators live in a
+      separate table with its own id sequence and are not included, so this is
+      the size of the population that can actually be marked present.
+
+      Predates the analytics slices and is kept for deployed clients. The
+      headline numbers an administrator actually wants are at
+      `/api/v1/dashboard/admin/kpis`.
+    responses:
+      '200':
+        description: The counts.
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [message, data]
+              properties:
+                message: { type: string, examples: [Admin dashboard totals fetched successfully] }
+                data: { $ref: '#/components/schemas/DashboardAdminTotals' }
+      '401': { $ref: '#/components/responses/Unauthorized' }
+      '403': { $ref: '#/components/responses/Forbidden' }
+
+/api/v1/dashboard/admin/attendance-data:
+  get:
+    tags: [Dashboard]
+    operationId: getDashboardAdminAttendanceData
+    summary: Platform-wide attendance over a date range
+    description: |
+      Administrator-only (ADMIN). Attendants receive 403.
+
+      **Both `startDate` and `endDate` are required here**, unlike the newer
+      slices, and there is no `preset`. Omitting either is a 400, as is a range
+      wider than 400 days: the cap exists because this is a hot landing-page
+      call and an unbounded window would be an unbounded scan.
+
+      `statusCounts` and `statusPercentages` are returned both nested under
+      `summary` and at the top level. The duplication is intentional, since the
+      original charts read the top-level copies and breaking them would buy
+      nothing.
+
+      Note that `uniqueUsers` on a day row is distinct within that day and does
+      not sum across days. The period-wide figure is `summary.uniqueUsersAttended`.
+    parameters:
+      - $ref: '#/components/parameters/StartDate'
+      - $ref: '#/components/parameters/EndDate'
+    responses:
+      '200':
+        description: Summary, per-day series, and the status split.
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [message, data]
+              properties:
+                message: { type: string, examples: [All users attendance data fetched successfully] }
+                data: { $ref: '#/components/schemas/DashboardAdminAttendanceData' }
+      '400': { $ref: '#/components/responses/DashboardRangeError' }
+      '401': { $ref: '#/components/responses/Unauthorized' }
+      '403': { $ref: '#/components/responses/Forbidden' }
+
+/api/v1/dashboard/admin/live:
+  get:
+    tags: [Dashboard]
+    operationId: getDashboardLiveSnapshot
+    summary: What is happening on the floor right now
+    description: |
+      Administrator-only (ADMIN). Attendants receive 403.
+
+      **Takes no range at all.** It is a point-in-time view of the venue, and
+      a date filter on "now" would be a contradiction. Poll it for the live
+      strip at the top of the board; `asOf` is returned so the client can show
+      how stale its copy is rather than implying the figures are continuous.
+
+      `checkedInNow` is the number believed to be physically present: checked
+      into a currently open session, with no check-out and not swept up by the
+      automatic session close. That exclusion matters, because a roll call
+      that counted people the system already closed out would be worse than no
+      roll call. `checkInsToday` is cumulative and will normally exceed it.
+
+      `openAnomalies` spans all time rather than today, since a review backlog
+      does not expire at midnight.
+    responses:
+      '200':
+        description: The current state of the floor.
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [message, data]
+              properties:
+                message: { type: string, examples: [Live snapshot fetched successfully] }
+                data: { $ref: '#/components/schemas/DashboardLiveSnapshot' }
+      '401': { $ref: '#/components/responses/Unauthorized' }
+      '403': { $ref: '#/components/responses/Forbidden' }
+
+/api/v1/dashboard/admin/kpis:
+  get:
+    tags: [Dashboard]
+    operationId: getDashboardAdminKpis
+    summary: The administrator hero KPI row
+    description: |
+      Administrator-only (ADMIN). Attendants receive 403.
+
+      Six headline metrics across presence, punctuality, and integrity, each
+      with a trend against the immediately preceding window of identical
+      length. Lateness and anomaly volume are flagged `inverse`, so a client
+      knows to paint a fall in either as good news.
+
+      `enrollmentCoverage` is the outlier and carries no trend: it is the share
+      of the roster with a face template enrolled, which is the ceiling on how
+      many people can check in at all. A low value there undermines every other
+      number on this board, so it is shown even though it does not move with
+      the date picker.
+
+      Takes the standard analytics range: either a `preset` or an explicit
+      `startDate` and `endDate` pair, both `YYYY-MM-DD`. Sending none of them
+      resolves `this_month`.
+    parameters:
+      - $ref: '#/components/parameters/RangePreset'
+      - $ref: '#/components/parameters/StartDate'
+      - $ref: '#/components/parameters/EndDate'
+    responses:
+      '200':
+        description: The KPI row.
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [message, data]
+              properties:
+                message: { type: string, examples: [Admin KPIs fetched successfully] }
+                data: { $ref: '#/components/schemas/DashboardAdminKpis' }
+      '400': { $ref: '#/components/responses/DashboardRangeError' }
+      '401': { $ref: '#/components/responses/Unauthorized' }
+      '403': { $ref: '#/components/responses/Forbidden' }
+
+/api/v1/dashboard/admin/presence-trend:
+  get:
+    tags: [Dashboard]
+    operationId: getDashboardPresenceTrend
+    summary: Platform attendance over time with a previous-period overlay
+    description: |
+      Administrator-only (ADMIN). Attendants receive 403.
+
+      The main attendance chart: present, late, and absent per bucket, an
+      attendance-rate line, and `previousTotal` on each point for the ghosted
+      comparison series.
+
+      The overlay is all-or-nothing. When the preceding window does not bucket
+      into the same number of points, which happens where a window straddles
+      month boundaries, every `previousTotal` comes back null and the client
+      draws no overlay. A comparison line whose points are quietly offset by a
+      day is worse than none.
+
+      `summary` carries the period totals and the busiest bucket's label, so
+      the card header needs no second request.
+
+      Takes the standard analytics range: either a `preset` or an explicit
+      `startDate` and `endDate` pair, both `YYYY-MM-DD`. Sending none of them
+      resolves `this_month`.
+    parameters:
+      - $ref: '#/components/parameters/RangePreset'
+      - $ref: '#/components/parameters/StartDate'
+      - $ref: '#/components/parameters/EndDate'
+    responses:
+      '200':
+        description: The time series plus period totals.
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [message, data]
+              properties:
+                message: { type: string, examples: [Presence trend fetched successfully] }
+                data: { $ref: '#/components/schemas/DashboardPresenceTrend' }
+      '400': { $ref: '#/components/responses/DashboardRangeError' }
+      '401': { $ref: '#/components/responses/Unauthorized' }
+      '403': { $ref: '#/components/responses/Forbidden' }
+
+/api/v1/dashboard/admin/presence-breakdown:
+  get:
+    tags: [Dashboard]
+    operationId: getDashboardPresenceBreakdown
+    summary: Attendance cut by status, event type, event, or venue
+    description: |
+      Administrator-only (ADMIN). Attendants receive 403.
+
+      One categorical cut per call, chosen with `by`. The four dimensions
+      answer different questions: `status` is the overall present, late, and
+      absent donut, `eventType` splits recurring against one-off attendance,
+      and `event` and `location` rank the ten busiest and add a per-row
+      attendance rate, which is what surfaces the well-attended venue whose
+      turnout is quietly collapsing.
+
+      An unrecognized `by` is not an error. It falls back to `status`, and the
+      response echoes the dimension actually used, so a client can always trust
+      `data.by` over what it asked for.
+
+      Takes the standard analytics range: either a `preset` or an explicit
+      `startDate` and `endDate` pair, both `YYYY-MM-DD`. Sending none of them
+      resolves `this_month`.
+    parameters:
+      - $ref: '#/components/parameters/DashboardPresenceDimension'
+      - $ref: '#/components/parameters/RangePreset'
+      - $ref: '#/components/parameters/StartDate'
+      - $ref: '#/components/parameters/EndDate'
+    responses:
+      '200':
+        description: The segments for the requested dimension.
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [message, data]
+              properties:
+                message: { type: string, examples: [Presence breakdown fetched successfully] }
+                data: { $ref: '#/components/schemas/DashboardPresenceBreakdown' }
+      '400': { $ref: '#/components/responses/DashboardRangeError' }
+      '401': { $ref: '#/components/responses/Unauthorized' }
+      '403': { $ref: '#/components/responses/Forbidden' }
+
+/api/v1/dashboard/admin/punctuality-trend:
+  get:
+    tags: [Dashboard]
+    operationId: getDashboardPunctualityTrend
+    summary: On-time versus late arrivals over time
+    description: |
+      Administrator-only (ADMIN). Attendants receive 403.
+
+      Lateness is measured as the check-in instant minus the session's
+      scheduled open, floored at zero per row so an early arrival cannot
+      cancel out a late one in the mean. Each bucket returns the on-time and
+      late counts, the on-time rate, and the mean minutes late.
+
+      This is the axis a turnout chart cannot show: attendance can sit flat at
+      95% for a month while arrivals drift steadily later, and only this
+      series makes that visible.
+
+      Only rows that produced a check-in are counted. A no-show has no arrival
+      time and so has no punctuality.
+
+      Takes the standard analytics range: either a `preset` or an explicit
+      `startDate` and `endDate` pair, both `YYYY-MM-DD`. Sending none of them
+      resolves `this_month`.
+    parameters:
+      - $ref: '#/components/parameters/RangePreset'
+      - $ref: '#/components/parameters/StartDate'
+      - $ref: '#/components/parameters/EndDate'
+    responses:
+      '200':
+        description: The punctuality series.
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [message, data]
+              properties:
+                message: { type: string, examples: [Punctuality trend fetched successfully] }
+                data: { $ref: '#/components/schemas/DashboardPunctualityTrend' }
+      '400': { $ref: '#/components/responses/DashboardRangeError' }
+      '401': { $ref: '#/components/responses/Unauthorized' }
+      '403': { $ref: '#/components/responses/Forbidden' }
+
+/api/v1/dashboard/admin/lateness-distribution:
+  get:
+    tags: [Dashboard]
+    operationId: getDashboardLatenessDistribution
+    summary: How late people are, as a histogram
+    description: |
+      Administrator-only (ADMIN). Attendants receive 403.
+
+      Every check-in in the window binned by minutes past the scheduled open:
+      on time, 1 to 5, 6 to 15, 16 to 30, 31 to 60, and over 60.
+
+      The shape is the finding. A mean of eight minutes is either a whole room
+      arriving a few minutes behind, which is a scheduling problem, or most
+      people on time with a tail turning up an hour in, which is a different
+      problem entirely. Averaging flattens the two into the same number.
+
+      All six bins are always returned in the same order, even at zero.
+
+      Takes the standard analytics range: either a `preset` or an explicit
+      `startDate` and `endDate` pair, both `YYYY-MM-DD`. Sending none of them
+      resolves `this_month`.
+    parameters:
+      - $ref: '#/components/parameters/RangePreset'
+      - $ref: '#/components/parameters/StartDate'
+      - $ref: '#/components/parameters/EndDate'
+    responses:
+      '200':
+        description: The six lateness bins.
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [message, data]
+              properties:
+                message: { type: string, examples: [Lateness distribution fetched successfully] }
+                data: { $ref: '#/components/schemas/DashboardLatenessDistribution' }
+      '400': { $ref: '#/components/responses/DashboardRangeError' }
+      '401': { $ref: '#/components/responses/Unauthorized' }
+      '403': { $ref: '#/components/responses/Forbidden' }
+
+/api/v1/dashboard/admin/arrival-heatmap:
+  get:
+    tags: [Dashboard]
+    operationId: getDashboardArrivalHeatmap
+    summary: Check-in counts by day of week and hour of day
+    description: |
+      Administrator-only (ADMIN). Attendants receive 403.
+
+      A day-of-week by hour-of-day grid of when arrivals actually happen, with
+      both axes in venue time so the picture matches what a person standing at
+      the door would have seen. `dow` is 0 for Sunday through 6 for Saturday.
+
+      This is where a schedule's real shape shows up: the session that opens at
+      nine but fills at ten, or the weekday everyone treats as optional.
+
+      Only non-empty cells are returned, so a quiet week is a handful of
+      entries rather than 168, and `maxCount` is supplied so the colour scale
+      is settled server-side rather than recomputed by every client.
+
+      Takes the standard analytics range: either a `preset` or an explicit
+      `startDate` and `endDate` pair, both `YYYY-MM-DD`. Sending none of them
+      resolves `this_month`.
+    parameters:
+      - $ref: '#/components/parameters/RangePreset'
+      - $ref: '#/components/parameters/StartDate'
+      - $ref: '#/components/parameters/EndDate'
+    responses:
+      '200':
+        description: The populated cells and the scale maximum.
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [message, data]
+              properties:
+                message: { type: string, examples: [Arrival heatmap fetched successfully] }
+                data: { $ref: '#/components/schemas/DashboardArrivalHeatmap' }
+      '400': { $ref: '#/components/responses/DashboardRangeError' }
+      '401': { $ref: '#/components/responses/Unauthorized' }
+      '403': { $ref: '#/components/responses/Forbidden' }
+
+/api/v1/dashboard/admin/anomaly-trend:
+  get:
+    tags: [Dashboard]
+    operationId: getDashboardAnomalyTrend
+    summary: Anomaly volume over time, split by type
+    description: |
+      Administrator-only (ADMIN). Attendants receive 403.
+
+      Anomaly flags are the detective side of the check-in flow: a reviewable
+      record that an attempt looked wrong, written whether or not the attempt
+      was ultimately allowed. This series counts them per bucket, pre-split
+      into the four kinds so a stacked chart needs no second pass.
+
+      The four kinds mean different things. A duplicate descriptor is a
+      captured face matching someone else's enrolled template. A liveness
+      failure is a capture that did not convince the server it was a live
+      person rather than a photo or a screen. A suspected replay is a capture
+      resembling material already seen. Rapid attempts are retries arriving
+      faster than a person plausibly produces them.
+
+      A rising line here is the early warning that someone is probing the flow,
+      which is why it is charted separately from attendance rather than folded
+      into it.
+
+      Takes the standard analytics range: either a `preset` or an explicit
+      `startDate` and `endDate` pair, both `YYYY-MM-DD`. Sending none of them
+      resolves `this_month`.
+    parameters:
+      - $ref: '#/components/parameters/RangePreset'
+      - $ref: '#/components/parameters/StartDate'
+      - $ref: '#/components/parameters/EndDate'
+    responses:
+      '200':
+        description: The anomaly series, zero-filled.
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [message, data]
+              properties:
+                message: { type: string, examples: [Anomaly trend fetched successfully] }
+                data: { $ref: '#/components/schemas/DashboardAnomalyTrend' }
+      '400': { $ref: '#/components/responses/DashboardRangeError' }
+      '401': { $ref: '#/components/responses/Unauthorized' }
+      '403': { $ref: '#/components/responses/Forbidden' }
+
+/api/v1/dashboard/admin/anomaly-breakdown:
+  get:
+    tags: [Dashboard]
+    operationId: getDashboardAnomalyBreakdown
+    summary: Anomalies cut by type or severity, with resolution progress
+    description: |
+      Administrator-only (ADMIN). Attendants receive 403.
+
+      Each segment carries both how many flags of that kind were raised and how
+      many have since been resolved, so the gap between the two is the review
+      backlog for that category. That is the number that decides where a
+      reviewer spends the morning.
+
+      `by` accepts `type` or `severity`; anything else is treated as `type`,
+      and the response echoes the dimension actually used.
+
+      The whole catalog is always returned in a fixed order, even at zero, so
+      the chart's categories do not reshuffle between refreshes.
+
+      Takes the standard analytics range: either a `preset` or an explicit
+      `startDate` and `endDate` pair, both `YYYY-MM-DD`. Sending none of them
+      resolves `this_month`.
+    parameters:
+      - $ref: '#/components/parameters/DashboardAnomalyDimension'
+      - $ref: '#/components/parameters/RangePreset'
+      - $ref: '#/components/parameters/StartDate'
+      - $ref: '#/components/parameters/EndDate'
+    responses:
+      '200':
+        description: The segments for the requested dimension.
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [message, data]
+              properties:
+                message: { type: string, examples: [Anomaly breakdown fetched successfully] }
+                data: { $ref: '#/components/schemas/DashboardAnomalyBreakdown' }
+      '400': { $ref: '#/components/responses/DashboardRangeError' }
+      '401': { $ref: '#/components/responses/Unauthorized' }
+      '403': { $ref: '#/components/responses/Forbidden' }
+
+/api/v1/dashboard/admin/liveness-quality:
+  get:
+    tags: [Dashboard]
+    operationId: getDashboardLivenessQuality
+    summary: How confidently the biometric check is deciding
+    description: |
+      Administrator-only (ADMIN). Attendants receive 403.
+
+      Two distributions over the retained capture evidence, measuring the
+      health of the face check itself rather than anybody's attendance.
+
+      `livenessScore` runs 0 to 1 and is the server's confidence that it saw a
+      live person rather than a photo or a replayed video. Higher is better,
+      and a mass piling up at the low end usually means captures are being
+      rejected on camera quality or lighting, not on fraud.
+
+      `matchDistance` is the distance between the captured face and the
+      enrolled template, so **lower is better**, the reverse of the other
+      histogram. The accept cutoff is 0.6 and is returned as `threshold` rather
+      than hard-coded into the chart. A cluster sitting just under it is the
+      warning that enrollments have aged and are about to start failing.
+
+      Capture evidence is deliberately short-lived, so a long window can return
+      fewer records than it has check-ins. That is the retention policy working
+      as designed, not missing data.
+
+      Takes the standard analytics range: either a `preset` or an explicit
+      `startDate` and `endDate` pair, both `YYYY-MM-DD`. Sending none of them
+      resolves `this_month`.
+    parameters:
+      - $ref: '#/components/parameters/RangePreset'
+      - $ref: '#/components/parameters/StartDate'
+      - $ref: '#/components/parameters/EndDate'
+    responses:
+      '200':
+        description: Both histograms with their means.
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [message, data]
+              properties:
+                message: { type: string, examples: [Liveness quality fetched successfully] }
+                data: { $ref: '#/components/schemas/DashboardLivenessQuality' }
+      '400': { $ref: '#/components/responses/DashboardRangeError' }
+      '401': { $ref: '#/components/responses/Unauthorized' }
+      '403': { $ref: '#/components/responses/Forbidden' }
+
+/api/v1/dashboard/admin/integrity-summary:
+  get:
+    tags: [Dashboard]
+    operationId: getDashboardIntegritySummary
+    summary: The composite integrity score and the totals behind it
+    description: |
+      Administrator-only (ADMIN). Attendants receive 403.
+
+      The one number that answers "can I trust this period's attendance", plus
+      everything needed to argue with it.
+
+      The score is a 0 to 100 weighted blend of three components, each
+      published with its own weight so the UI can show the working rather than
+      presenting a verdict: clean check-ins at 0.55, meaning the share of
+      verified attempts that raised no flag; anomaly resolution at 0.15,
+      meaning the share of flags that have been reviewed; and liveness quality
+      at 0.30, meaning the mean liveness score of retained evidence.
+
+      A component with no data is dropped and the remaining weights are
+      renormalized, so a deployment that retains no evidence is not scored down
+      for a dimension it has nothing to say about. That is why `components` can
+      hold two entries rather than three.
+
+      `summary` adds the raw totals, including mean time to resolve a flag,
+      which is computed across resolved flags only. Unresolved ones are
+      excluded rather than treated as infinite, so the figure measures review
+      speed and not backlog size. `openAnomalies` there spans all time, since a
+      backlog does not belong to a window.
+
+      Takes the standard analytics range: either a `preset` or an explicit
+      `startDate` and `endDate` pair, both `YYYY-MM-DD`. Sending none of them
+      resolves `this_month`.
+    parameters:
+      - $ref: '#/components/parameters/RangePreset'
+      - $ref: '#/components/parameters/StartDate'
+      - $ref: '#/components/parameters/EndDate'
+    responses:
+      '200':
+        description: The score, its components, the totals, and the anomaly catalog counts.
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [message, data]
+              properties:
+                message: { type: string, examples: [Integrity summary fetched successfully] }
+                data: { $ref: '#/components/schemas/DashboardIntegritySummary' }
+      '400': { $ref: '#/components/responses/DashboardRangeError' }
+      '401': { $ref: '#/components/responses/Unauthorized' }
+      '403': { $ref: '#/components/responses/Forbidden' }
+
+/api/v1/dashboard/admin/top-attendees:
+  get:
+    tags: [Dashboard]
+    operationId: getDashboardTopAttendees
+    summary: The turnout leaderboard
+    description: |
+      Administrator-only (ADMIN). Attendants receive 403.
+
+      Attendants ranked by how often they actually turned up in the window,
+      with ties broken in favour of whoever was on time more often, so
+      consistency outranks raw volume.
+
+      `limit` is clamped into 1 to 50 rather than rejected. This is a fixed
+      top-N cut and not a paginated list: there is no page cursor and no `meta`
+      block, because ranking past the top few attendees is a report rather than
+      a dashboard widget. Use the reporting endpoints for the full roster.
+
+      This is the only analytics slice that returns per-person identity, which
+      is exactly why the AI summary endpoint never reads it.
+
+      An entry reads `Unknown attendee` when the account has since been removed
+      but its attendance history survives. Removing a person must not silently
+      rewrite the record of who was in the room.
+
+      Takes the standard analytics range: either a `preset` or an explicit
+      `startDate` and `endDate` pair, both `YYYY-MM-DD`. Sending none of them
+      resolves `this_month`.
+    parameters:
+      - $ref: '#/components/parameters/DashboardTopAttendeesLimit'
+      - $ref: '#/components/parameters/RangePreset'
+      - $ref: '#/components/parameters/StartDate'
+      - $ref: '#/components/parameters/EndDate'
+    responses:
+      '200':
+        description: The ranked leaderboard.
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [message, data]
+              properties:
+                message: { type: string, examples: [Top attendees fetched successfully] }
+                data: { $ref: '#/components/schemas/DashboardTopAttendees' }
+      '400': { $ref: '#/components/responses/DashboardRangeError' }
+      '401': { $ref: '#/components/responses/Unauthorized' }
+      '403': { $ref: '#/components/responses/Forbidden' }
+
+/api/v1/dashboard/admin/retention-curve:
+  get:
+    tags: [Dashboard]
+    operationId: getDashboardRetentionCurve
+    summary: Cohort retention across a recurring event's occurrences
+    description: |
+      Administrator-only (ADMIN). Attendants receive 403.
+
+      Whether a recurring event keeps the crowd it started with. The cohort is
+      everyone who attended the first occurrence, and each later occurrence
+      reports how many of them came back.
+
+      Measuring against the founding cohort rather than the previous occurrence
+      is deliberate. A curve that dips and recovers means the same people
+      drifted back, whereas occurrence-on-occurrence ratios can stay flat while
+      the room turns over completely.
+
+      **Takes `eventId` only and no date range.** The curve is defined by the
+      event's own occurrence sequence, so a calendar window would cut it in an
+      arbitrary place. Occurrences are capped at 52, which is already more
+      curve than anyone reads.
+
+      Omit `eventId` and the server picks the recurring event with the most
+      occurrences, so the chart is never empty on first load. A non-numeric
+      value, an unknown id, or the id of a one-off event all fall back to that
+      same default rather than answering 404, and the response names the event
+      it actually used. `availableEvents` is always returned, which is what
+      populates the selector without a second call.
+
+      `event` is null only when the deployment has no recurring events at all.
+    parameters:
+      - $ref: '#/components/parameters/DashboardRetentionEventId'
+    responses:
+      '200':
+        description: The curve, the cohort size, and the selectable events.
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [message, data]
+              properties:
+                message: { type: string, examples: [Retention curve fetched successfully] }
+                data: { $ref: '#/components/schemas/DashboardRetentionCurve' }
+      '401': { $ref: '#/components/responses/Unauthorized' }
+      '403': { $ref: '#/components/responses/Forbidden' }
+
+/api/v1/dashboard/admin/ai-summary:
+  post:
+    tags: [Dashboard]
+    operationId: generateDashboardAiSummary
+    summary: Generate a written summary of the period
+    description: |
+      Administrator-only (ADMIN). Attendants receive 403.
+
+      An executive narrative of the period's presence and integrity, in plain
+      text: a headline, a few bullets, and two or three recommendations.
+
+      **This is a POST and it takes its range in the request body, not the
+      query string.** Every other analytics slice is a GET with query
+      parameters. This one differs because it is a generation request with a
+      cost and a side effect at the provider rather than a cacheable read, and
+      shaping it as a GET would invite clients to re-issue it on every
+      navigation. The body accepts the same `preset` or `startDate` and
+      `endDate` fields the others take as query parameters, all optional, with
+      an empty body resolving `this_month`.
+
+      **Check `data.configured` before reading anything else.** It reports
+      whether an AI provider is wired up on this deployment at all. When it is
+      false the response is still 200 and `{ "configured": false }` is the
+      entire payload, so a deployment that never enabled the feature renders a
+      quiet empty state rather than an error the operator has to explain. The
+      `message` also changes to `AI summary not configured`. Since nothing is
+      computed in that case, an invalid range still answers 200 rather than
+      400.
+
+      The model only ever sees aggregate figures. The snapshot is assembled
+      from the KPI, integrity, and breakdown slices and never from the
+      leaderboard, so no attendee name, email, or per-person row can reach the
+      provider. That firewall is a property of how the payload is built rather
+      than a filter applied afterwards, and the exact snapshot is returned as
+      `stats` so the narrative can be audited against the numbers it claims to
+      describe.
+    requestBody:
+      required: false
+      content:
+        application/json:
+          schema: { $ref: '#/components/schemas/DashboardAiSummaryRequest' }
+    responses:
+      '200':
+        description: |
+          The generated narrative, or a `configured: false` declaration that no
+          provider is set up. Both are successes.
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [message, data]
+              properties:
+                message:
+                  type: string
+                  description: '`AI summary generated`, or `AI summary not configured`.'
+                  examples: [AI summary generated]
+                data: { $ref: '#/components/schemas/DashboardAiSummary' }
+      '400': { $ref: '#/components/responses/DashboardRangeError' }
+      '401': { $ref: '#/components/responses/Unauthorized' }
+      '403': { $ref: '#/components/responses/Forbidden' }
+      '500':
+        description: |
+          The AI provider rejected the request or was unreachable. Only
+          possible when a provider is configured, and it is the one failure on
+          this board that is not the caller's fault, so a client should offer a
+          retry rather than hiding the card.
+        headers:
+          X-Request-Id: { $ref: '#/components/headers/XRequestId' }
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/Error' }

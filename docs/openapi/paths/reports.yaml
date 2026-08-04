@@ -1,0 +1,407 @@
+/api/v1/attendance-reports:
+  get:
+    tags: [Reports]
+    operationId: listAttendanceReports
+    summary: Read the filtered attendance report
+    description: |
+      Administrator only. Attendants cannot read this surface at all: it spans
+      the whole roster, so an attendant reaching it would be reading their
+      colleagues' movements.
+
+      Returns one flattened row per attendance record, ordered by check-in
+      time, newest first, with the session, event, and venue already resolved
+      onto the row. The report is read as a table and exported as a
+      spreadsheet, so it is shaped as columns rather than as the object graph
+      the attendance endpoints return.
+
+      **This response deviates from the standard list envelope.** Alongside
+      `data` and `meta` it carries two extra top-level keys, `topAttendees` and
+      `summary`. They are siblings of `data` rather than properties of it
+      because they are not computed over the page: both are computed over every
+      row matching the current filters. Paging from page 1 to page 5 changes
+      `data` and leaves the leaderboard and the status totals untouched.
+      Nesting them under `data` would imply they described the page, and a
+      client would then be right to recompute them on every page change, which
+      is exactly the wrong answer for a report where "who attends most" is a
+      property of the filter, not of the scroll position.
+
+      Every filter is optional and they compose with AND. Free-text filters are
+      case-insensitive substring matches; `status` and `userId` are exact.
+      Repeating a filter (`?status=A&status=B`) or sending it as an array
+      (`?search[]=x`) makes Express hand the server a non-string, which is
+      answered with a 400 rather than being coerced into a query nobody
+      intended.
+
+      For the same filters as a downloadable workbook, see
+      `GET /api/v1/attendance-reports/export`.
+    parameters:
+      - $ref: '#/components/parameters/Search'
+      - $ref: '#/components/parameters/ReportUserId'
+      - $ref: '#/components/parameters/ReportEventName'
+      - $ref: '#/components/parameters/ReportLocationName'
+      - $ref: '#/components/parameters/ReportStatus'
+      - $ref: '#/components/parameters/ReportIsRecurring'
+      - $ref: '#/components/parameters/ReportEventType'
+      - $ref: '#/components/parameters/ReportCheckInStartDate'
+      - $ref: '#/components/parameters/ReportCheckInEndDate'
+      - $ref: '#/components/parameters/ReportSessionStartDate'
+      - $ref: '#/components/parameters/ReportSessionEndDate'
+      - $ref: '#/components/parameters/ReportCity'
+      - $ref: '#/components/parameters/ReportCountry'
+      - $ref: '#/components/parameters/Page'
+      - $ref: '#/components/parameters/Limit'
+    responses:
+      '200':
+        description: |
+          The page of rows, plus the leaderboard and status totals for the
+          whole filtered set.
+        headers:
+          X-Request-Id: { $ref: '#/components/headers/XRequestId' }
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/ReportListResponse' }
+            example:
+              message: Attendance reports successfully fetched.
+              data:
+                - attendanceId: 4021
+                  userName: Alice Wonder
+                  userEmail: alice@example.com
+                  userId: 12
+                  eventTitle: Weekly Standup
+                  eventId: 3
+                  eventType: MEETING
+                  isRecurring: true
+                  sessionId: 58
+                  sessionStartDate: '2026-03-12T00:00:00.000Z'
+                  sessionEndDate: '2026-03-12T00:00:00.000Z'
+                  location:
+                    id: 7
+                    name: Main Hall
+                    city: Accra
+                    country: Ghana
+                  checkInTime: '2026-03-12T12:00:00.000Z'
+                  checkOutTime: null
+                  status: LATE
+                  createdAt: '2026-03-12T12:00:01.000Z'
+              topAttendees:
+                - userId: 12
+                  userName: Alice Wonder
+                  email: alice@example.com
+                  profilePicture: null
+                  attendanceCount: 3
+              summary:
+                totalAttendance: 4
+                presentCount: 2
+                lateCount: 1
+                absentCount: 1
+              meta: { total: 4, page: 1, limit: 10, totalPages: 1 }
+      '400':
+        description: |
+          A filter could not be read: `userId` was not an integer, `status` was
+          not one of `PRESENT`, `LATE`, or `ABSENT`, or a free-text filter
+          arrived as an array instead of a string.
+        headers:
+          X-Request-Id: { $ref: '#/components/headers/XRequestId' }
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/Error' }
+            example:
+              status: error
+              message: 'Invalid status. Must be one of: PRESENT, LATE, ABSENT'
+              requestId: 3f1c9d2e-5b7a-4c11-9f60-2a8e4d0b7c31
+      '401': { $ref: '#/components/responses/Unauthorized' }
+      '403': { $ref: '#/components/responses/Forbidden' }
+
+/api/v1/attendance-reports/export:
+  get:
+    tags: [Reports]
+    operationId: exportAttendanceReport
+    summary: Download the filtered attendance report as a spreadsheet
+    description: |
+      Administrator only, for the same reason the report itself is: this is the
+      whole roster in one file.
+
+      **Returns a binary .xlsx workbook, not JSON.** The body is an Excel file
+      and the browser is expected to save it, driven by the
+      `Content-Disposition` header. Nothing about the response follows the
+      usual `{ message, data }` envelope.
+
+      It accepts exactly the same filter query as
+      `GET /api/v1/attendance-reports` and runs it through the same query
+      builder. That is deliberate: an operator exports what they are looking
+      at. Narrow the on-screen report, add `/export` to the same URL, and the
+      workbook contains those rows and no others. The only query keys this
+      endpoint ignores are `page` and `limit`, because an export is not paged.
+
+      The workbook has three sheets. **Summary** carries the status totals, the
+      number of rows written, and a generation timestamp. **Records** is one
+      row per attendance with the attendee, event, venue, session date,
+      check-in, check-out, and status, with instants rendered in the venue
+      timezone so an exported time matches the clock on the wall where it was
+      recorded. **Top attendees** is the same leaderboard the JSON report
+      returns, ranked.
+
+      Two details worth knowing. An export materializes at most 10,000 rows; if
+      the filters match more, the file is capped and the Summary sheet says so
+      and asks you to narrow the filters, so a truncated export can never be
+      mistaken for a complete one. And any cell value beginning with a formula
+      trigger is prefixed with a quote before it is written, because attendee
+      names and emails are user-controlled and a spreadsheet would otherwise
+      execute them on open.
+    parameters:
+      - $ref: '#/components/parameters/Search'
+      - $ref: '#/components/parameters/ReportUserId'
+      - $ref: '#/components/parameters/ReportEventName'
+      - $ref: '#/components/parameters/ReportLocationName'
+      - $ref: '#/components/parameters/ReportStatus'
+      - $ref: '#/components/parameters/ReportIsRecurring'
+      - $ref: '#/components/parameters/ReportEventType'
+      - $ref: '#/components/parameters/ReportCheckInStartDate'
+      - $ref: '#/components/parameters/ReportCheckInEndDate'
+      - $ref: '#/components/parameters/ReportSessionStartDate'
+      - $ref: '#/components/parameters/ReportSessionEndDate'
+      - $ref: '#/components/parameters/ReportCity'
+      - $ref: '#/components/parameters/ReportCountry'
+    responses:
+      '200':
+        description: The workbook. Save it; there is nothing to parse as JSON.
+        headers:
+          Content-Disposition:
+            description: |
+              Always an attachment, with a date-stamped filename of the form
+              `attendance-report-YYYY-MM-DD.xlsx`. The date is when the export
+              ran, not the range it covers, so re-exporting the same filters
+              tomorrow produces a differently named file with the same content.
+            schema:
+              type: string
+              examples: ['attachment; filename="attendance-report-2026-03-12.xlsx"']
+          X-Request-Id: { $ref: '#/components/headers/XRequestId' }
+        content:
+          application/vnd.openxmlformats-officedocument.spreadsheetml.sheet:
+            schema:
+              type: string
+              format: binary
+      '400':
+        description: |
+          A filter could not be read, exactly as on the report list endpoint.
+          The error is the usual JSON envelope, not a workbook, so a client must
+          check the status before treating the body as a file.
+        headers:
+          X-Request-Id: { $ref: '#/components/headers/XRequestId' }
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/Error' }
+      '401': { $ref: '#/components/responses/Unauthorized' }
+      '403': { $ref: '#/components/responses/Forbidden' }
+
+/api/v1/review/audit-logs:
+  get:
+    tags: [Review]
+    operationId: listAuditLogs
+    summary: Read the audit trail
+    description: |
+      Administrator only. An attendant reading this would see every other
+      attendant's activity, so the surface is closed to them entirely.
+
+      The audit log is the append-only record of who did what: each failed
+      liveness check, each duplicate-face enrollment attempt, each
+      administrative mutation, each anomaly an administrator signs off. Entries
+      are written alongside the action they describe and are never updated,
+      because a trail that a later action can rewrite proves nothing.
+
+      Entries come back newest first. The actor is stored as a kind plus an id
+      rather than a foreign key, so a record survives the deletion of the
+      account it names and background jobs can be recorded as `SYSTEM` with no
+      principal at all.
+
+      Both filters are exact matches on a server-chosen vocabulary, not
+      substring searches. Sending either as an array is a 400 rather than
+      something Prisma has to interpret.
+    parameters:
+      - $ref: '#/components/parameters/ReviewAuditAction'
+      - $ref: '#/components/parameters/ReviewActorKind'
+      - $ref: '#/components/parameters/Page'
+      - $ref: '#/components/parameters/Limit'
+    responses:
+      '200':
+        description: A page of audit entries, newest first.
+        headers:
+          X-Request-Id: { $ref: '#/components/headers/XRequestId' }
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/ReviewAuditLogListResponse' }
+            example:
+              message: Audit log fetched successfully.
+              data:
+                - id: 903
+                  actorKind: USER
+                  actorId: 12
+                  action: CHECK_IN_LIVENESS_FAILED
+                  targetType: Event
+                  targetId: 3
+                  metadata:
+                    reasons: [identity_mismatch]
+                    step: true
+                  ip: 196.61.35.12
+                  createdAt: '2026-03-12T12:04:11.000Z'
+              meta: { total: 1, page: 1, limit: 10, totalPages: 1 }
+      '400':
+        description: |
+          `action` or `actorKind` arrived as an array rather than a single
+          string.
+        headers:
+          X-Request-Id: { $ref: '#/components/headers/XRequestId' }
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/Error' }
+      '401': { $ref: '#/components/responses/Unauthorized' }
+      '403': { $ref: '#/components/responses/Forbidden' }
+
+/api/v1/review/anomalies:
+  get:
+    tags: [Review]
+    operationId: listAnomalies
+    summary: Read the anomaly queue
+    description: |
+      Administrator only, and the reason the anomaly pipeline is worth writing
+      at all: without a review surface the flags would be write-only.
+
+      Anomalies are raised automatically as attendance and enrollment run.
+      Enrolling a face that already matches another account's template raises
+      `DUPLICATE_DESCRIPTOR`; a rejected server-side liveness verdict raises
+      `LIVENESS_FAILED`, or `REPLAY_SUSPECTED` when the frames look like
+      recorded media rather than a live capture; tripping the check-in rate
+      limit raises `RAPID_ATTEMPTS`, because a genuine attendee never needs
+      twenty tries in fifteen minutes.
+
+      These are detective controls, not preventive ones. A flag records that an
+      attempt looked wrong; whether the attempt was allowed through was decided
+      separately by the venue code and liveness gates. So a flag is a question
+      for a human, not a verdict, which is why every row can be resolved and
+      none of them block anything.
+
+      Rows come back newest first and are enriched at read time, since the flag
+      itself holds no foreign keys. The attendant's display fields are joined
+      in, and so is the retained evidence: the frames kept for that one flagged
+      attempt, plus the liveness score and match distance behind the verdict.
+      Frame URLs are signed per response and expire shortly after, so a
+      response body never becomes standing access to somebody's face.
+
+      Filter with `resolved=false` to get the working queue.
+    parameters:
+      - $ref: '#/components/parameters/ReviewResolved'
+      - $ref: '#/components/parameters/ReviewAnomalyTypeFilter'
+      - $ref: '#/components/parameters/Page'
+      - $ref: '#/components/parameters/Limit'
+    responses:
+      '200':
+        description: A page of anomaly flags, newest first.
+        headers:
+          X-Request-Id: { $ref: '#/components/headers/XRequestId' }
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/ReviewAnomalyListResponse' }
+            example:
+              message: Anomaly flags fetched successfully.
+              data:
+                - id: 140
+                  type: LIVENESS_FAILED
+                  severity: MEDIUM
+                  detail:
+                    reasons: [identity_mismatch]
+                    action: CHECK_IN
+                  eventId: 3
+                  createdAt: '2026-03-12T12:04:11.000Z'
+                  resolvedAt: null
+                  user:
+                    id: 12
+                    firstName: Alice
+                    lastName: Wonder
+                    email: alice@example.com
+                  evidence:
+                    id: 88
+                    frameUrls: ['https://res.cloudinary.test/signed/bethere/evidence/frame-1']
+                    livenessScore: 0.1
+                    matchDistance: 0.92
+              meta: { total: 1, page: 1, limit: 10, totalPages: 1 }
+      '400':
+        description: |
+          `type` was not one of the four anomaly types, or arrived as an array.
+          An unrecognized type is rejected rather than returning an empty page,
+          because an empty page reads as "no anomalies of this kind" and a typo
+          would then look like an all-clear.
+        headers:
+          X-Request-Id: { $ref: '#/components/headers/XRequestId' }
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/Error' }
+            example:
+              status: error
+              message: 'Invalid anomaly type. Must be one of: DUPLICATE_DESCRIPTOR, LIVENESS_FAILED, REPLAY_SUSPECTED, RAPID_ATTEMPTS'
+              requestId: 3f1c9d2e-5b7a-4c11-9f60-2a8e4d0b7c31
+      '401': { $ref: '#/components/responses/Unauthorized' }
+      '403': { $ref: '#/components/responses/Forbidden' }
+
+/api/v1/review/anomalies/{anomalyId}/resolve:
+  patch:
+    tags: [Review]
+    operationId: resolveAnomaly
+    summary: Mark an anomaly reviewed
+    description: |
+      Administrator only. Stamps `resolvedAt` on the flag, which moves it out of
+      the `resolved=false` working queue and into the closed history.
+
+      Resolving means "a human has looked at this and it needs no further
+      action". It does not undo anything, does not reverse a refused check-in,
+      and does not delete the flag or its evidence: the row stays queryable
+      forever, and the frames are still governed by their own retention window.
+      The only thing that changes is whether the flag is still asking for
+      attention.
+
+      The stamp and its audit entry are written in one transaction, so a crash
+      cannot leave an anomaly marked reviewed with no record of who reviewed it.
+      That audit entry is an `ANOMALY_RESOLVED` action against the flag id, and
+      it shows up on `GET /api/v1/review/audit-logs` like everything else.
+
+      Resolving an already-resolved flag succeeds and simply moves the
+      timestamp forward, so a double-click is harmless.
+
+      The response carries only a message. There is no `data` key: the client
+      already knows which flag it resolved, and re-reading the queue is what it
+      does next anyway.
+    parameters:
+      - $ref: '#/components/parameters/ReviewAnomalyIdPath'
+    responses:
+      '200':
+        description: The flag is marked reviewed and the audit entry is written.
+        headers:
+          X-Request-Id: { $ref: '#/components/headers/XRequestId' }
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/MessageResponse' }
+            example:
+              message: Anomaly marked as resolved.
+      '400':
+        description: '`anomalyId` was missing or did not parse as an integer.'
+        headers:
+          X-Request-Id: { $ref: '#/components/headers/XRequestId' }
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/Error' }
+            example:
+              status: error
+              message: Valid anomaly ID is required.
+              requestId: 3f1c9d2e-5b7a-4c11-9f60-2a8e4d0b7c31
+      '401': { $ref: '#/components/responses/Unauthorized' }
+      '403': { $ref: '#/components/responses/Forbidden' }
+      '404':
+        description: No anomaly flag with that id.
+        headers:
+          X-Request-Id: { $ref: '#/components/headers/XRequestId' }
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/Error' }
+            example:
+              status: error
+              message: Anomaly not found.
+              requestId: 3f1c9d2e-5b7a-4c11-9f60-2a8e4d0b7c31

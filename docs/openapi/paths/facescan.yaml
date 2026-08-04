@@ -1,0 +1,585 @@
+/api/v1/facescan/challenge:
+  post:
+    tags: [Face scan]
+    operationId: createFaceEnrollmentChallenge
+    summary: Start a batch enrollment capture
+    description: |
+      Step one of enrollment. Draws three distinct actions at random from
+      `TURN_LEFT`, `TURN_RIGHT`, `BLINK` and `SMILE`, records them server-side,
+      and returns them with a signed single-use token valid for 60 seconds.
+
+      This endpoint exists to defeat replay. Without it, enrollment would accept
+      any set of frames a caller happened to hold, so a recording of the right
+      person, or a video played back at the camera, would enroll them. The
+      client learns which actions to perform only after the server has drawn
+      them, and the frames must prove those actions in that order, so a capture
+      made before the draw cannot satisfy it. The authoritative action list is
+      read back from the database row rather than from the token, and the row is
+      consumed atomically, so a token cannot be edited to demand easier actions
+      or replayed to drive a second enrollment.
+
+      Attendants only (`USER`). Administrators do not enroll faces and are
+      refused with 403.
+
+      It fails fast when a template already exists, so a user who would be
+      rejected at the end is never walked through the capture. Rate limited to
+      20 challenges per 15 minutes per principal, shared with
+      `POST /api/v1/facescan/step-challenge`, and deliberately roomier than the
+      submit budget because a client may mint a challenge and abandon the
+      capture when the camera is denied or the page is closed.
+    responses:
+      '200':
+        description: A challenge was issued. Perform the actions in the order given.
+        headers:
+          X-Request-Id: { $ref: '#/components/headers/XRequestId' }
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/FaceEnrollmentChallengeResponse' }
+            example:
+              message: Perform the actions shown to register your face.
+              data:
+                actions: [BLINK, TURN_LEFT, SMILE]
+                challengeToken: eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJ1c2VySWQiOjEyfQ.sIgNaTuRe
+                expiresAt: '2026-08-04T10:15:00.000Z'
+      '401': { $ref: '#/components/responses/Unauthorized' }
+      '403':
+        description: |
+          The caller is not an attendant. Administrators reach this, and so does
+          any principal whose role is not `USER`.
+        headers:
+          X-Request-Id: { $ref: '#/components/headers/XRequestId' }
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/Error' }
+      '404':
+        description: |
+          The account behind the session no longer exists, which is what a
+          session outliving a deleted attendant by a moment looks like.
+        headers:
+          X-Request-Id: { $ref: '#/components/headers/XRequestId' }
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/Error' }
+      '409':
+        description: |
+          A template is already enrolled. Enrollment is once per account: only
+          an administrator can clear it, via
+          `DELETE /api/v1/facescan/{userId}`. A user who could silently
+          re-enroll could replace their template with a colleague's and hand
+          over their attendance.
+        headers:
+          X-Request-Id: { $ref: '#/components/headers/XRequestId' }
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/Error' }
+            example:
+              status: error
+              message: User face scan already exists. Contact an admin to reset your face scan before updating.
+              requestId: 3f1c9d2e-5b7a-4c11-9f60-2a8e4d0b7c31
+      '429': { $ref: '#/components/responses/RateLimited' }
+
+/api/v1/facescan:
+  post:
+    tags: [Face scan]
+    operationId: enrollFaceScan
+    summary: Enroll a face from a batch capture
+    description: |
+      Step two, and the one that creates the biometric. The frames from a single
+      burst are uploaded as `multipart/form-data`, the server runs the face
+      engine over them, proves each challenged action fired in order, and
+      derives the 128-float template itself.
+
+      Nothing about the template is taken on trust from the client. It is
+      computed here, encrypted with AES-256-GCM and bound to the owning account
+      before it is written, and decrypted in memory only when a check-in has to
+      be matched. It is never returned by this endpoint or any other, and the
+      raw frames are discarded with the request: they are buffered in memory,
+      never written to disk or to an image host, and never stored.
+
+      Consent is a precondition, not a formality. `consent` must be exactly
+      `true` or the request is refused before any biometric is derived, and the
+      accepted consent is stored as a timestamp plus the policy version in force
+      (`2026-07-v1`). Bumping that version when the notice materially changes is
+      what forces re-consent rather than letting an old agreement cover a new
+      practice.
+
+      Two integrity checks run after liveness passes. The derived template is
+      compared against every other enrolled account, and a match is refused with
+      409 and flagged as a `DUPLICATE_DESCRIPTOR` anomaly, which is the classic
+      buddy-punching move of enrolling one face under two accounts. The write is
+      then guarded on the template column still being empty, so two captures
+      started in two tabs cannot both pass the earlier check and let the second,
+      possibly a different person, overwrite the first.
+
+      Attendants only (`USER`). Rate limited to 10 submissions per 15 minutes
+      per principal. This is the expensive endpoint, running sequential WASM
+      inference over up to 16 frames on the request thread, so an unlimited one
+      would let a single authenticated user pin the event loop.
+    requestBody:
+      required: true
+      content:
+        multipart/form-data:
+          schema: { $ref: '#/components/schemas/FaceEnrollmentRequest' }
+          encoding:
+            frames:
+              contentType: image/jpeg, image/png, image/webp, image/heic, image/heif
+    responses:
+      '200':
+        description: |
+          Enrolled. The response carries the refreshed account with
+          `hasFaceScan` now true, and nothing else about the face.
+        headers:
+          X-Request-Id: { $ref: '#/components/headers/XRequestId' }
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/FaceEnrollmentResponse' }
+            example:
+              message: Face scan added successfully.
+              data:
+                user:
+                  id: 12
+                  firstName: Amina
+                  lastName: Yakubu
+                  email: amina@example.com
+                  role: USER
+                  hasPassword: true
+                  hasFaceScan: true
+                  phoneVerified: true
+                  twoFactorEnabled: false
+                  biometricConsentAt: '2026-08-04T10:15:22.000Z'
+                  biometricConsentVersion: 2026-07-v1
+                  createdAt: '2026-07-01T09:00:00.000Z'
+                  updatedAt: '2026-08-04T10:15:22.000Z'
+      '400':
+        description: |
+          Several distinct causes share this status, told apart by `code`.
+
+          `VALIDATION_ERROR` covers a missing or non-string `challengeToken`, a
+          `consent` that is not a boolean, and a frame count outside 6 to 16.
+          `INVALID_IMAGE` means a part passed the declared mimetype check but
+          its bytes are not a real image. `UPLOAD_ERROR` means a frame exceeded
+          1.5 MB or too many parts were sent; multer limits are reported as
+          client errors here rather than as a 413.
+
+          With no `code`, it is one of the two refusals the service raises: no
+          consent, or a capture the engine could not verify as a live face. The
+          liveness case names the reasons and the failed actions in `details`
+          outside production, and is recorded as `FACE_ENROLL_FAILED` in the
+          audit trail either way.
+        headers:
+          X-Request-Id: { $ref: '#/components/headers/XRequestId' }
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/FaceLivenessRejection' }
+            example:
+              status: error
+              message: We could not verify a live face in that capture. Please follow the prompts in order and try again.
+              requestId: 3f1c9d2e-5b7a-4c11-9f60-2a8e4d0b7c31
+              details:
+                reasons: [action_not_satisfied, insufficient_motion]
+                failedActions: [BLINK]
+      '401':
+        description: |
+          Either the session is gone, or the challenge is. The challenge cases
+          carry `CHALLENGE_EXPIRED` when the token no longer verifies,
+          `CHALLENGE_INVALID` when it verifies but was minted for another
+          principal, another purpose, or a check-in rather than an enrollment,
+          and `CHALLENGE_CONSUMED` when it was already spent. All three mean the
+          same thing to a client: start again at
+          `POST /api/v1/facescan/challenge`.
+        headers:
+          X-Request-Id: { $ref: '#/components/headers/XRequestId' }
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/Error' }
+            example:
+              status: error
+              message: This check-in challenge was already used or has expired.
+              requestId: 3f1c9d2e-5b7a-4c11-9f60-2a8e4d0b7c31
+              code: CHALLENGE_CONSUMED
+      '403':
+        description: The caller is not an attendant.
+        headers:
+          X-Request-Id: { $ref: '#/components/headers/XRequestId' }
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/Error' }
+      '404':
+        description: The account behind the session no longer exists.
+        headers:
+          X-Request-Id: { $ref: '#/components/headers/XRequestId' }
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/Error' }
+      '409':
+        description: |
+          Either a template is already enrolled for this account, including the
+          case where a concurrent capture won the guarded write, or the derived
+          template matches one already held by a different account. The second
+          is the buddy-punching refusal: it also raises a HIGH severity
+          `DUPLICATE_DESCRIPTOR` anomaly naming the matched account, so the pair
+          can be reviewed rather than merely blocked.
+        headers:
+          X-Request-Id: { $ref: '#/components/headers/XRequestId' }
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/Error' }
+            example:
+              status: error
+              message: This face appears to be enrolled on another account already. Please contact an admin.
+              requestId: 3f1c9d2e-5b7a-4c11-9f60-2a8e4d0b7c31
+      '429': { $ref: '#/components/responses/RateLimited' }
+
+/api/v1/facescan/step-challenge:
+  post:
+    tags: [Face scan]
+    operationId: createFaceEnrollmentStepChallenge
+    summary: Start a step-by-step enrollment capture
+    description: |
+      The guided alternative to the batch flow, and the one the UI uses. It
+      draws the same three randomized actions and defeats replay for the same
+      reason, but the user proves one action at a time and the server accepts or
+      rejects each before the next is prompted, so a failure names the action
+      that went wrong instead of discarding a whole capture.
+
+      The token lives for 5 minutes rather than 60 seconds, because the flow
+      spans several verified round-trips. That does not widen the replay window:
+      the challenge row tracks which step is due, each advance is a guarded
+      write so a step cannot be double-counted, and the row is stamped consumed
+      on the final step.
+
+      The cross-step state, including the per-step descriptors accumulated
+      towards the template, is encrypted at rest exactly like the template
+      itself, so a partially completed enrollment is no more readable in the
+      database than a finished one.
+
+      Attendants only (`USER`), refused with 409 when a template already exists,
+      and sharing the 20 per 15 minutes challenge budget with
+      `POST /api/v1/facescan/challenge`.
+    responses:
+      '200':
+        description: A step challenge was issued. Prompt `nextAction` first.
+        headers:
+          X-Request-Id: { $ref: '#/components/headers/XRequestId' }
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/FaceEnrollmentStepChallengeResponse' }
+            example:
+              message: Step-by-step face registration started. Perform the first action.
+              data:
+                actions: [SMILE, BLINK, TURN_RIGHT]
+                challengeToken: eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJ1c2VySWQiOjEyfQ.sIgNaTuRe
+                currentStep: 0
+                nextAction: SMILE
+                totalSteps: 3
+                expiresAt: '2026-08-04T10:20:00.000Z'
+      '401': { $ref: '#/components/responses/Unauthorized' }
+      '403':
+        description: The caller is not an attendant.
+        headers:
+          X-Request-Id: { $ref: '#/components/headers/XRequestId' }
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/Error' }
+      '404':
+        description: The account behind the session no longer exists.
+        headers:
+          X-Request-Id: { $ref: '#/components/headers/XRequestId' }
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/Error' }
+      '409':
+        description: A template is already enrolled. An administrator must reset it first.
+        headers:
+          X-Request-Id: { $ref: '#/components/headers/XRequestId' }
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/Error' }
+      '429': { $ref: '#/components/responses/RateLimited' }
+
+/api/v1/facescan/step:
+  post:
+    tags: [Face scan]
+    operationId: submitFaceEnrollmentStep
+    summary: Submit one action of a step-by-step enrollment
+    description: |
+      Uploads the dense burst for the action currently due and, on the last one,
+      commits the enrollment. The step to prove comes from the challenge row,
+      not from the request, so a client cannot skip an action or choose an
+      easier one.
+
+      From the second step onward the burst must also match the descriptor taken
+      at the first step. That is what stops a capture starting with one person's
+      face and finishing with another's, which is the obvious attack on a flow
+      that verifies in pieces. A failed step does not advance the challenge, so
+      the user simply retries that action.
+
+      Consent is captured on the first step, before any biometric is derived,
+      and must be exactly `true`; later steps may omit it. On the final step the
+      template is derived from the descriptors accumulated across the scan,
+      refused if they do not cluster as one person, checked against every other
+      enrolled account, and only then encrypted and stored with the consent
+      timestamp and policy version. The frames themselves are never persisted at
+      any step, and no response ever contains the descriptor.
+
+      Both an intermediate step and the final commit answer 200, so clients must
+      branch on `data.done` rather than on the status code.
+
+      Attendants only (`USER`). Rate limited to 40 uploads per 15 minutes per
+      principal, sized for per-action traffic: one enrollment is roughly three
+      uploads plus retries, so an honest scan is never throttled.
+    requestBody:
+      required: true
+      content:
+        multipart/form-data:
+          schema: { $ref: '#/components/schemas/FaceStepEnrollmentRequest' }
+          encoding:
+            frames:
+              contentType: image/jpeg, image/png, image/webp, image/heic, image/heif
+    responses:
+      '200':
+        description: |
+          The action was verified. `data.done` is false while steps remain, and
+          true on the final step, which is the one that carries the refreshed
+          account with `hasFaceScan` set.
+        headers:
+          X-Request-Id: { $ref: '#/components/headers/XRequestId' }
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/FaceStepEnrollmentResponse' }
+            examples:
+              stepAccepted:
+                summary: An intermediate step
+                value:
+                  message: Action verified. Perform the next action.
+                  data:
+                    done: false
+                    currentStep: 1
+                    nextAction: BLINK
+                    totalSteps: 3
+              enrollmentComplete:
+                summary: The final step
+                value:
+                  message: Face scan added successfully.
+                  data:
+                    done: true
+                    user:
+                      id: 12
+                      firstName: Amina
+                      lastName: Yakubu
+                      email: amina@example.com
+                      role: USER
+                      hasPassword: true
+                      hasFaceScan: true
+                      phoneVerified: true
+                      twoFactorEnabled: false
+                      biometricConsentAt: '2026-08-04T10:22:41.000Z'
+                      biometricConsentVersion: 2026-07-v1
+                      createdAt: '2026-07-01T09:00:00.000Z'
+                      updatedAt: '2026-08-04T10:22:41.000Z'
+      '400':
+        description: |
+          `VALIDATION_ERROR` covers a missing or non-string `challengeToken`, a
+          non-boolean `consent`, and a frame count outside 4 to 20.
+          `INVALID_IMAGE` and `UPLOAD_ERROR` mean the same as on the batch
+          endpoint: bytes that are not really an image, and a frame over 1.5 MB
+          or too many parts.
+
+          With no `code`, consent was withheld on the first step. `STEP_FAILED`
+          is the one to branch on in the client: this action was not proven, the
+          challenge did not advance, and the same step should be retried rather
+          than the whole scan restarted. A final step whose accumulated
+          descriptors do not agree on one person fails without that code, and
+          the scan does have to start again.
+        headers:
+          X-Request-Id: { $ref: '#/components/headers/XRequestId' }
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/FaceLivenessRejection' }
+            example:
+              status: error
+              message: We could not verify a live face for that action. Follow the prompt and try this step again.
+              requestId: 3f1c9d2e-5b7a-4c11-9f60-2a8e4d0b7c31
+              code: STEP_FAILED
+              details:
+                action: BLINK
+                reasons: [action_not_satisfied]
+      '401':
+        description: |
+          The session is gone, or the step challenge is: `CHALLENGE_EXPIRED`,
+          `CHALLENGE_INVALID` for a token belonging to another principal or
+          minted for a check-in rather than an enrollment, or
+          `CHALLENGE_CONSUMED` once the scan has been completed. A batch token
+          replayed here is rejected as invalid, because the two carry different
+          purposes.
+        headers:
+          X-Request-Id: { $ref: '#/components/headers/XRequestId' }
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/Error' }
+      '403':
+        description: The caller is not an attendant.
+        headers:
+          X-Request-Id: { $ref: '#/components/headers/XRequestId' }
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/Error' }
+      '404':
+        description: The account behind the session no longer exists.
+        headers:
+          X-Request-Id: { $ref: '#/components/headers/XRequestId' }
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/Error' }
+      '409':
+        description: |
+          The scan cannot take this upload. Either a template is already
+          enrolled for the account, or every action has already been proven, or
+          this exact step was already recorded and a duplicate submit lost the
+          guarded advance. The last case is a retry racing itself rather than an
+          error to show the user: the client should continue with the step the
+          server reports as due.
+        headers:
+          X-Request-Id: { $ref: '#/components/headers/XRequestId' }
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/Error' }
+            example:
+              status: error
+              message: That action was already recorded. Please continue with the next step.
+              requestId: 3f1c9d2e-5b7a-4c11-9f60-2a8e4d0b7c31
+      '429': { $ref: '#/components/responses/RateLimited' }
+
+/api/v1/facescan/{userId}:
+  parameters:
+    - $ref: '#/components/parameters/FaceScanUserId'
+  get:
+    tags: [Face scan]
+    operationId: getFaceScanStatus
+    summary: Check whether an attendant is enrolled
+    description: |
+      Answers one question: does this attendant have a template on file. That is
+      all a caller can learn, because it is all this endpoint can say. The
+      descriptor is not in the response shape at any level, so no combination of
+      parameters returns it.
+
+      Open to administrators (`ADMIN`) for any attendant, and to attendants
+      (`USER`) for themselves only. Requesting somebody else's is 403 rather
+      than 401, deliberately: the caller is authenticated, and cookie clients
+      read a 401 as an expired session and sign the user out, so an IDOR probe
+      or a stale link would log a legitimate user out instead of showing an
+      error. "Self" compares the principal table as well as the id, since
+      administrators and attendants have overlapping id sequences.
+    responses:
+      '200':
+        description: A template is enrolled for this attendant.
+        headers:
+          X-Request-Id: { $ref: '#/components/headers/XRequestId' }
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/FaceScanStatusResponse' }
+            example:
+              message: Face scan retrieved successfully.
+              data:
+                hasFaceScan: true
+      '400':
+        description: '`userId` is not a number. `code` is `VALIDATION_ERROR`.'
+        headers:
+          X-Request-Id: { $ref: '#/components/headers/XRequestId' }
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/Error' }
+      '401': { $ref: '#/components/responses/Unauthorized' }
+      '403':
+        description: |
+          An attendant asked about another attendant. Administrators never see
+          this.
+        headers:
+          X-Request-Id: { $ref: '#/components/headers/XRequestId' }
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/Error' }
+            example:
+              status: error
+              message: Only admins can access other users' face scans.
+              requestId: 3f1c9d2e-5b7a-4c11-9f60-2a8e4d0b7c31
+      '404':
+        description: |
+          No such attendant, or the attendant exists with nothing enrolled. The
+          two share a status because an unenrolled account is reported as
+          absence rather than as a `false`, which keeps the success body free of
+          any state a caller could misread as biometric detail.
+        headers:
+          X-Request-Id: { $ref: '#/components/headers/XRequestId' }
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/Error' }
+            example:
+              status: error
+              message: No face scan data found for the user.
+              requestId: 3f1c9d2e-5b7a-4c11-9f60-2a8e4d0b7c31
+
+  delete:
+    tags: [Face scan]
+    operationId: deleteFaceScan
+    summary: Reset an attendant's enrollment
+    description: |
+      Destroys the stored template and everything recorded with it: both
+      descriptor columns, the consent timestamp, the consent version, and the
+      last-used marker. This is a real erasure rather than a flag, which is what
+      makes it usable as the answer to a data subject asking for their biometric
+      to be deleted, and it is the only way an attendant can enroll again after
+      a bad capture or a new phone.
+
+      Administrators only (`ADMIN`). An attendant cannot clear their own
+      template, and that restriction is the point of the once-per-account rule:
+      a user who could reset at will could swap in a colleague's face and hand
+      over their attendance. Every reset is written to the audit trail as
+      `FACE_RESET` against the acting administrator.
+
+      A template with no successful match for a year is also purged
+      automatically by the retention sweep, so dormant biometrics do not
+      accumulate whether or not anyone remembers to call this.
+    responses:
+      '200':
+        description: |
+          The template and its consent record are gone. The attendant can start
+          a fresh enrollment immediately.
+        headers:
+          X-Request-Id: { $ref: '#/components/headers/XRequestId' }
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/MessageResponse' }
+            example:
+              message: Face scan deleted successfully.
+      '400':
+        description: '`userId` is not a number. `code` is `VALIDATION_ERROR`.'
+        headers:
+          X-Request-Id: { $ref: '#/components/headers/XRequestId' }
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/Error' }
+      '401': { $ref: '#/components/responses/Unauthorized' }
+      '403':
+        description: |
+          The caller is not an administrator. Attendants are refused here even
+          for their own account.
+        headers:
+          X-Request-Id: { $ref: '#/components/headers/XRequestId' }
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/Error' }
+      '404':
+        description: |
+          No such attendant, or nothing was enrolled to delete. Reporting the
+          no-op as 404 keeps a reset that changed nothing distinguishable from
+          one that did, which matters when the action is being evidenced.
+        headers:
+          X-Request-Id: { $ref: '#/components/headers/XRequestId' }
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/Error' }
+            example:
+              status: error
+              message: No face scan data found for user with ID 12.
+              requestId: 3f1c9d2e-5b7a-4c11-9f60-2a8e4d0b7c31

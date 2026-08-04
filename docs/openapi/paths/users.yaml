@@ -1,0 +1,640 @@
+/api/v1/users:
+  get:
+    tags: [Users]
+    operationId: listUsers
+    summary: List attendant accounts
+    description: |
+      The administrator's roster view. **ADMIN only**: an attendant has no
+      business enumerating their colleagues, so the role gate rejects them
+      before the query runs.
+
+      Rows come back newest first and carry the safe account shape, so the
+      biometric descriptor is never present in a bulk response; `hasFaceScan`
+      says whether a template exists and nothing more.
+
+      Soft-deleted accounts are absent from this list even though their rows
+      still exist, because attendance history has to keep referencing them.
+
+      `search` matches first name, last name, email, or phone,
+      case-insensitively and as a substring, so a partial phone number such as
+      `540000001` finds its owner.
+    parameters:
+      - $ref: '#/components/parameters/Page'
+      - $ref: '#/components/parameters/Limit'
+      - $ref: '#/components/parameters/Search'
+    responses:
+      '200':
+        description: |
+          A page of attendants. When the page is empty the `message` switches
+          to an empty-state sentence and `meta.total` is reported as 0.
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/UserListResponse' }
+      '400':
+        description: |
+          A malformed filter. Repeating the parameter (`?search[]=a&search[]=b`)
+          makes it arrive as an array, which is refused here rather than
+          reaching the database as a non-string.
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/Error' }
+      '401': { $ref: '#/components/responses/Unauthorized' }
+      '403': { $ref: '#/components/responses/Forbidden' }
+
+  post:
+    tags: [Users]
+    operationId: createUser
+    summary: Create an attendant account
+    description: |
+      **ADMIN only.** Registers someone on the attendance roster.
+
+      The account is created without a password on purpose: the new attendant
+      signs in with a one-time code sent to their email or phone, and may set a
+      password later themselves. That way an administrator never has to invent,
+      transmit, or know a colleague's credential. Sending a `password` field is
+      a validation error rather than a silent no-op.
+
+      The email must be unused in BOTH principal tables, and the check ignores
+      soft deletion, so a removed account keeps its address reserved and cannot
+      be resurrected by re-registering it.
+    requestBody:
+      required: true
+      content:
+        application/json:
+          schema: { $ref: '#/components/schemas/UserCreateRequest' }
+    responses:
+      '201':
+        description: The attendant was created. Returns the new account.
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [message, data]
+              properties:
+                message: { type: string, examples: [User created successfully.] }
+                data: { $ref: '#/components/schemas/AttendantAccount' }
+      '400': { $ref: '#/components/responses/ValidationError' }
+      '401': { $ref: '#/components/responses/Unauthorized' }
+      '403': { $ref: '#/components/responses/Forbidden' }
+      '409':
+        description: |
+          The email is already registered to an administrator or an attendant,
+          or the phone number already belongs to another attendant.
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/Error' }
+
+/api/v1/users/change-password:
+  patch:
+    tags: [Users]
+    operationId: changeUserPassword
+    summary: Set or change your own password
+    description: |
+      **USER only, and always self-service.** The account is taken from the
+      session, never from the body, so this endpoint cannot be pointed at
+      anyone else.
+
+      Administrators are refused with 403 even though the route's role gate
+      lets them through, because they have their own endpoint at
+      `PATCH /api/v1/admins/change-password` where the current password is
+      mandatory. Routing them here would let the passwordless branch below
+      apply to a staff account.
+
+      Two cases share this endpoint. An attendant who has never had a password
+      sets their first one with no `currentPassword` at all. An attendant who
+      already has one must supply it correctly, and the new password must
+      differ from it. Which case applies is decided from the stored row, not
+      from what the client sent.
+
+      On success every session for the account is revoked, including the one
+      that made this call, so a password change also evicts an attacker who
+      already had a session. The client must sign in again.
+    requestBody:
+      required: true
+      content:
+        application/json:
+          schema: { $ref: '#/components/schemas/UserChangePasswordRequest' }
+    responses:
+      '200':
+        description: |
+          The password is set. All sessions for this account are now revoked.
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/MessageResponse' }
+            example:
+              message: Password updated successfully
+      '400':
+        description: |
+          The new password fails the policy, or the current password was
+          missing, wrong, or identical to the new one. Deliberately 400 rather
+          than 401: this is a bad request within a valid session, and a 401
+          would make a cookie client log the user out over a typo.
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/Error' }
+      '401': { $ref: '#/components/responses/Unauthorized' }
+      '403':
+        description: |
+          The caller is an administrator. Use
+          `PATCH /api/v1/admins/change-password`.
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/Error' }
+      '404':
+        description: The account behind the session no longer exists.
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/Error' }
+
+/api/v1/users/{userId}:
+  parameters:
+    - $ref: '#/components/parameters/UserIdPath'
+
+  get:
+    tags: [Users]
+    operationId: getUserById
+    summary: Get one attendant account
+    description: |
+      **ADMIN, or the attendant themselves.** An attendant may read only their
+      own record; any administrator may read any attendant's.
+
+      "Self" means the id AND the principal kind match, because administrators
+      and attendants have independent id sequences and administrator 12 is not
+      attendant 12.
+
+      A soft-deleted attendant reads as 404, so a stale link cannot confirm
+      that an account once existed.
+    responses:
+      '200':
+        description: The attendant account.
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/UserResponse' }
+      '400':
+        description: '`userId` is not a number.'
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/Error' }
+      '401': { $ref: '#/components/responses/Unauthorized' }
+      '403':
+        description: |
+          An attendant asked for someone else's record. 403 and not 401 on
+          purpose: the caller is authenticated, and answering 401 would make a
+          cookie client treat an access-control denial as an expired session
+          and sign a legitimate user out.
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/Error' }
+      '404': { $ref: '#/components/responses/NotFound' }
+
+  put:
+    tags: [Users]
+    operationId: updateUserProfile
+    summary: Update an attendant profile
+    description: |
+      **ADMIN, or the attendant themselves.** Same owner-or-administrator rule
+      as the read.
+
+      A partial update: only the fields present in the body are written, so a
+      client can submit just what the user edited. Names are trimmed and
+      HTML-escaped before storage; the email and phone uniqueness checks run
+      only when the value actually changes, so resubmitting an unchanged
+      profile never conflicts with the account's own contact details.
+
+      The response is the full updated account in the safe shape. The password
+      hash and the face descriptor are stripped before serialization and have
+      never appeared here.
+    requestBody:
+      required: true
+      content:
+        application/json:
+          schema: { $ref: '#/components/schemas/UserProfileUpdateRequest' }
+    responses:
+      '200':
+        description: The updated attendant account.
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [message, data]
+              properties:
+                message: { type: string, examples: [Profile updated successfully.] }
+                data: { $ref: '#/components/schemas/AttendantAccount' }
+      '400': { $ref: '#/components/responses/ValidationError' }
+      '401': { $ref: '#/components/responses/Unauthorized' }
+      '403':
+        description: An attendant tried to edit another account's profile.
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/Error' }
+      '404': { $ref: '#/components/responses/NotFound' }
+      '409':
+        description: |
+          The new email is registered to another account in either table, or
+          the new phone belongs to another attendant.
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/Error' }
+
+  delete:
+    tags: [Users]
+    operationId: deleteUser
+    summary: Remove an attendant account
+    description: |
+      **ADMIN only.** A soft delete: the row survives so attendance history
+      stays intact and reports do not develop holes, but the account vanishes
+      from every read and can no longer sign in.
+
+      Three things happen in one transaction. The account is marked deleted,
+      its biometric template, consent record and last-use timestamp are
+      destroyed outright to honour the right to be forgotten, and every refresh
+      token is revoked. The session epoch is bumped in the same breath, so
+      access tokens already in flight stop working immediately rather than at
+      their natural expiry.
+
+      Deleting an already-deleted attendant reads as 404 rather than deleting
+      twice.
+
+      There is no bulk delete. `DELETE /api/v1/users` is not a route and
+      answers 404.
+    responses:
+      '200':
+        description: The attendant was soft-deleted and their sessions revoked.
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/MessageResponse' }
+            example:
+              message: User deleted successfully
+      '400':
+        description: '`userId` is not a number.'
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/Error' }
+      '401': { $ref: '#/components/responses/Unauthorized' }
+      '403': { $ref: '#/components/responses/Forbidden' }
+      '404': { $ref: '#/components/responses/NotFound' }
+
+/api/v1/users/{userId}/profile-picture:
+  parameters:
+    - $ref: '#/components/parameters/UserIdPath'
+
+  patch:
+    tags: [Users]
+    operationId: updateUserProfilePicture
+    summary: Replace an attendant profile picture
+    description: |
+      **ADMIN, or the attendant themselves.** Uploads one image as
+      `multipart/form-data` and swaps it in.
+
+      Accepted types are JPEG, PNG, WEBP, HEIC and HEIF, up to **5 MB**. The
+      declared mimetype is checked first, then the leading bytes of the file
+      are matched against the real image signatures, because the mimetype is
+      client-supplied metadata and anything at all can arrive labeled
+      `image/jpeg`.
+
+      The new asset is uploaded to Cloudinary BEFORE the row is updated, so a
+      failed upload leaves the existing picture in place instead of blanking
+      the profile. The old asset is deleted afterwards, off the response path,
+      as a best-effort cleanup that never fails the request.
+    requestBody:
+      required: true
+      content:
+        multipart/form-data:
+          schema: { $ref: '#/components/schemas/UserProfilePictureUpload' }
+          encoding:
+            profilePicture:
+              contentType: image/jpeg, image/png, image/webp, image/heic, image/heif
+    responses:
+      '200':
+        description: |
+          The picture was replaced. Returns the full account with the new
+          `profilePicture` URL.
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [message, data]
+              properties:
+                message: { type: string, examples: [Profile picture updated successfully.] }
+                data: { $ref: '#/components/schemas/AttendantAccount' }
+      '400':
+        description: |
+          No file was attached, the mimetype is not an accepted image type, the
+          bytes are not a real image (`code: INVALID_IMAGE`), or the file
+          exceeded 5 MB (`code: UPLOAD_ERROR`). The size case is reported as a
+          400 rather than a 413, since the multer limit is normalized into the
+          same client-error shape as the rest.
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/Error' }
+      '401': { $ref: '#/components/responses/Unauthorized' }
+      '403':
+        description: An attendant tried to replace another account's picture.
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/Error' }
+      '404': { $ref: '#/components/responses/NotFound' }
+
+/api/v1/admins:
+  get:
+    tags: [Admins]
+    operationId: listAdmins
+    summary: List administrator accounts
+    description: |
+      **ADMIN only**, like everything on this surface.
+
+      Newest first, and paginated with the same `page`/`limit` contract as
+      every other list. There is no search filter: the administrator roster is
+      small by design, so paging through it is the entire interaction.
+
+      Soft-deleted administrators are absent. The rows carry no biometric
+      fields at all, because administrators never enroll a face.
+    parameters:
+      - $ref: '#/components/parameters/Page'
+      - $ref: '#/components/parameters/Limit'
+    responses:
+      '200':
+        description: A page of administrators.
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/AdminListResponse' }
+      '401': { $ref: '#/components/responses/Unauthorized' }
+      '403': { $ref: '#/components/responses/Forbidden' }
+
+  post:
+    tags: [Admins]
+    operationId: createAdmin
+    summary: Create an administrator account
+    description: |
+      **ADMIN only.** Unlike attendant creation this one takes a password:
+      staff sign in with a password plus optional two-factor and have no
+      one-time code path, so an account created without one could never sign
+      in. Omitting it is a 400, never a 500.
+
+      There are no privilege tiers, so the account created here is the equal of
+      the account that created it. This endpoint is the whole administrative
+      trust boundary, which is also why the only way to lose administrator
+      access entirely is guarded at deletion time.
+
+      The password is hashed before storage and the hash never appears in any
+      response, including this one.
+    requestBody:
+      required: true
+      content:
+        application/json:
+          schema: { $ref: '#/components/schemas/AdminCreateRequest' }
+    responses:
+      '201':
+        description: The administrator was created. Returns the new account.
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [message, data]
+              properties:
+                message: { type: string, examples: [Admin created successfully.] }
+                data: { $ref: '#/components/schemas/AdminAccount' }
+      '400': { $ref: '#/components/responses/ValidationError' }
+      '401': { $ref: '#/components/responses/Unauthorized' }
+      '403': { $ref: '#/components/responses/Forbidden' }
+      '409':
+        description: |
+          The email is already registered, to an administrator or to an
+          attendant. Both tables are checked because login resolves one address
+          to exactly one account.
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/Error' }
+
+/api/v1/admins/change-password:
+  patch:
+    tags: [Admins]
+    operationId: changeAdminPassword
+    summary: Change your own administrator password
+    description: |
+      **ADMIN only, and always self-service.** The account is taken from the
+      session, so an administrator cannot reset a peer's password here; a
+      colleague who has lost theirs uses the emailed password-reset flow.
+
+      `currentPassword` is mandatory and is enforced both by the validator and
+      again by the service. An administrator always has a password, so there is
+      no first-password case, and refusing rather than falling through means an
+      unlocked laptop is not enough to take over the account.
+
+      The new password must differ from the current one. On success every
+      session for the account is revoked, including this one, which is why the
+      message tells the caller to sign in again.
+    requestBody:
+      required: true
+      content:
+        application/json:
+          schema: { $ref: '#/components/schemas/AdminChangePasswordRequest' }
+    responses:
+      '200':
+        description: |
+          The password was changed and all sessions for this administrator are
+          now revoked.
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/MessageResponse' }
+            example:
+              message: Password changed successfully. Please log in again.
+      '400':
+        description: |
+          The current password was missing, wrong, or the same as the new one,
+          or the new password fails the policy. A wrong current password is a
+          400 and not a 401, so a cookie client shows an error instead of
+          treating it as an expired session.
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/Error' }
+      '401': { $ref: '#/components/responses/Unauthorized' }
+      '403': { $ref: '#/components/responses/Forbidden' }
+      '404':
+        description: The administrator behind the session no longer exists.
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/Error' }
+
+/api/v1/admins/{adminId}:
+  parameters:
+    - $ref: '#/components/parameters/AdminIdPath'
+
+  get:
+    tags: [Admins]
+    operationId: getAdminById
+    summary: Get one administrator account
+    description: |
+      **ADMIN only.** Reads are open across the roster: any administrator may
+      read any other administrator, which is what makes the list view's detail
+      pages work. Attendants are refused with 403.
+
+      The response mirrors `GET /api/v1/users/{userId}` field for field, apart
+      from the biometric additions, so a client can switch between the two
+      surfaces by role without a second response parser.
+
+      A soft-deleted administrator reads as 404.
+    responses:
+      '200':
+        description: The administrator account.
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/AdminResponse' }
+      '400':
+        description: '`adminId` is not a number.'
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/Error' }
+      '401': { $ref: '#/components/responses/Unauthorized' }
+      '403': { $ref: '#/components/responses/Forbidden' }
+      '404': { $ref: '#/components/responses/NotFound' }
+
+  put:
+    tags: [Admins]
+    operationId: updateAdminProfile
+    summary: Update your own administrator profile
+    description: |
+      **ADMIN only, and self-only.** Unlike the read, this is restricted to the
+      caller's own row: `adminId` must be the signed-in administrator. Peers
+      are not editable here, because a profile edit that could retarget another
+      administrator's email would be an account takeover wearing the costume of
+      a settings form.
+
+      Partial, with the same field rules as the attendant profile update: names
+      trimmed and escaped, email and phone re-checked for uniqueness only when
+      they actually change. Email uniqueness spans both principal tables, so
+      claiming an address that belongs to an attendant is a 409.
+    requestBody:
+      required: true
+      content:
+        application/json:
+          schema: { $ref: '#/components/schemas/UserProfileUpdateRequest' }
+    responses:
+      '200':
+        description: The updated administrator account.
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [message, data]
+              properties:
+                message: { type: string, examples: [Profile updated successfully.] }
+                data: { $ref: '#/components/schemas/AdminAccount' }
+      '400': { $ref: '#/components/responses/ValidationError' }
+      '401': { $ref: '#/components/responses/Unauthorized' }
+      '403':
+        description: |
+          `adminId` is not the caller. 403 rather than 404, and rather than
+          401: the caller is authenticated and the row exists, they simply may
+          not touch it.
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/Error' }
+      '404': { $ref: '#/components/responses/NotFound' }
+      '409':
+        description: |
+          The new email belongs to another administrator or to an attendant, or
+          the new phone belongs to another administrator.
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/Error' }
+
+  delete:
+    tags: [Admins]
+    operationId: deleteAdmin
+    summary: Remove an administrator account
+    description: |
+      **ADMIN only**, and never yourself. Two guards stand in front of this,
+      both answering 403.
+
+      An administrator cannot delete their own account: an accidental
+      self-delete would revoke the caller's sessions mid-request and leave them
+      locked out of the surface they would need to undo it.
+
+      The last remaining administrator cannot be deleted either. Creating an
+      administrator is itself an administrator-only action, so removing the
+      final one would lock the organization out with no way back in.
+
+      Otherwise this is a soft delete with full session revocation, the same as
+      the attendant version, minus the biometric destruction that
+      administrators have nothing to destroy for.
+    responses:
+      '200':
+        description: The administrator was soft-deleted and their sessions revoked.
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/MessageResponse' }
+            example:
+              message: Admin deleted successfully.
+      '400':
+        description: '`adminId` is not a number.'
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/Error' }
+      '401': { $ref: '#/components/responses/Unauthorized' }
+      '403':
+        description: |
+          The caller is not an administrator, is trying to delete themselves,
+          or this is the last administrator left.
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/Error' }
+      '404': { $ref: '#/components/responses/NotFound' }
+
+/api/v1/admins/{adminId}/profile-picture:
+  parameters:
+    - $ref: '#/components/parameters/AdminIdPath'
+
+  patch:
+    tags: [Admins]
+    operationId: updateAdminProfilePicture
+    summary: Replace your own administrator profile picture
+    description: |
+      **ADMIN only, and self-only**, for the same reason the profile update is:
+      a peer's avatar is not the caller's to change.
+
+      Uploads one image as `multipart/form-data` in the `profilePicture` field.
+      Accepted types are JPEG, PNG, WEBP, HEIC and HEIF, up to **5 MB**, and
+      the leading bytes are verified against real image signatures rather than
+      trusting the declared mimetype.
+
+      The ownership check runs before the upload, so a rejected attempt never
+      pushes an asset to Cloudinary. On an allowed request the new asset is
+      uploaded first and the old one is removed afterwards, so a failed upload
+      cannot leave the account with no picture.
+    requestBody:
+      required: true
+      content:
+        multipart/form-data:
+          schema: { $ref: '#/components/schemas/UserProfilePictureUpload' }
+          encoding:
+            profilePicture:
+              contentType: image/jpeg, image/png, image/webp, image/heic, image/heif
+    responses:
+      '200':
+        description: |
+          The picture was replaced. Returns the full account with the new
+          `profilePicture` URL.
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [message, data]
+              properties:
+                message: { type: string, examples: [Profile picture updated successfully.] }
+                data: { $ref: '#/components/schemas/AdminAccount' }
+      '400':
+        description: |
+          No file was attached, the mimetype is not an accepted image type, the
+          bytes are not a real image (`code: INVALID_IMAGE`), or the file
+          exceeded 5 MB (`code: UPLOAD_ERROR`).
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/Error' }
+      '401': { $ref: '#/components/responses/Unauthorized' }
+      '403':
+        description: '`adminId` is not the caller, or the caller is not an administrator.'
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/Error' }
+      '404': { $ref: '#/components/responses/NotFound' }

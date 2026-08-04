@@ -1,0 +1,510 @@
+# Laptop-to-phone hand-off.
+#
+# Two auth models live in this one route file and the difference matters:
+#
+#   * `/api/v1/pairing` and `/api/v1/pairing/{pairingId}` are called by the
+#     laptop and use the session cookie, so they inherit the document's default
+#     `security` and declare none of their own.
+#   * everything under `/api/v1/pairing/session/` is called by the phone, which
+#     has no session at all, and overrides `security` with the bearer hand-off
+#     token.
+#
+# The narrow token is mounted only on these capture routes, which is what keeps
+# it from ever reaching a cookie-authenticated endpoint.
+
+/api/v1/pairing:
+  post:
+    tags: [Pairing]
+    operationId: startPairing
+    summary: Start a hand-off to a phone
+    description: |
+      Called by the laptop. An attendant sitting at a desktop with no camera, or
+      a camera the browser will not grant, cannot pass the live face check on
+      that machine. This starts a pairing so they can finish it on their phone:
+      the response carries a short-lived hand-off token, the laptop renders it as
+      a QR deep-link, and the phone opens that link.
+
+      The token is deliberately not a session. It is signed with a
+      `REMOTE_CAPTURE` purpose and bound to one user, one pairing, one scope and,
+      for attendance, one event and one direction, and it is accepted only on
+      `/api/v1/pairing/session/*`. A phone that scanned somebody's screen over
+      their shoulder therefore gets exactly one capture on one account it still
+      has to pass a live face check for, not a login.
+
+      **This endpoint has no express-validator chain.** The body is validated
+      inside the pairing service, so a bad `scope`, a missing or non-integer
+      `eventId` on an `ATTENDANCE` pairing, or an invalid `mode` comes back as a
+      plain 400 with a message and no `details.errors` block.
+
+      Attendants only. An administrator holds no face template and has nothing to
+      hand off, so an admin session is refused with 403 rather than allowed to
+      create a dangling pairing. Limited to 30 starts per principal per 15
+      minutes.
+
+      Answers **201**, not 200: a pairing row is created and the pairing id in
+      the response is the handle to it.
+    requestBody:
+      required: true
+      content:
+        application/json:
+          schema: { $ref: '#/components/schemas/PairingStartRequest' }
+    responses:
+      '201':
+        description: |
+          Pairing created and PENDING. Render `handoffToken` in the QR code and
+          start polling `pairingId`. Both die at `expiresAt`, five minutes out.
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/PairingStartResponse' }
+      '400':
+        description: |
+          `scope` was neither `ATTENDANCE` nor `ENROLL`, an `ATTENDANCE` pairing
+          arrived without a valid integer `eventId`, or the resolved mode was not
+          legal for the scope. Validated in the service, so there is no per-field
+          `details.errors`.
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/Error' }
+            example:
+              status: error
+              message: A valid event is required to pair a check-in.
+              requestId: 3f1c9d2e-5b7a-4c11-9f60-2a8e4d0b7c31
+      '401': { $ref: '#/components/responses/Unauthorized' }
+      '403':
+        description: |
+          An administrator session. Pairing exists for the face check, which only
+          attendants perform.
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/Error' }
+      '429': { $ref: '#/components/responses/RateLimited' }
+
+/api/v1/pairing/{pairingId}:
+  get:
+    tags: [Pairing]
+    operationId: getPairingStatus
+    summary: Poll whether the phone has finished
+    description: |
+      Called by the laptop, on a short interval, while the QR code is on screen.
+      When `status` flips to `COMPLETED` the laptop can stop showing the code and
+      refresh whatever the capture produced.
+
+      The response is deliberately thin. It says whether the phone finished, not
+      what it captured, so a polling loop never becomes a second route to
+      attendance or biometric state.
+
+      A pairing whose window has lapsed reads as `EXPIRED` without any write
+      happening: the status is computed against `expiresAt` at read time, and the
+      row is dropped later by the retention sweep. That means the laptop sees the
+      expiry the moment it happens rather than whenever a job next runs.
+
+      Ownership is enforced, and a pairing belonging to another account is a 403
+      rather than a 404. The limiter here is roomy, 400 requests per principal per
+      15 minutes, precisely because this is meant to be polled every couple of
+      seconds for a few minutes.
+    parameters:
+      - $ref: '#/components/parameters/PairingIdPath'
+    responses:
+      '200':
+        description: The pairing's current state.
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/PairingStatusResponse' }
+            example:
+              message: Pairing status.
+              data:
+                status: COMPLETED
+                scope: ATTENDANCE
+                completedAt: '2026-08-04T09:14:22.187Z'
+      '401': { $ref: '#/components/responses/Unauthorized' }
+      '403':
+        description: |
+          The pairing belongs to another account, or the caller is an
+          administrator. Not a 404, because the row does exist and the caller is
+          authenticated, they simply may not see it.
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/Error' }
+      '404':
+        description: |
+          No pairing with that id. Also what a long-finished pairing returns once
+          the retention sweep has deleted the row.
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/Error' }
+      '429': { $ref: '#/components/responses/RateLimited' }
+
+/api/v1/pairing/session/context:
+  get:
+    tags: [Pairing]
+    operationId: getPairingContext
+    summary: Read what this hand-off is authorized to capture
+    description: |
+      The phone's first call after opening the QR deep-link. The caller here is a
+      phone with no session of its own: it authenticates with the bearer hand-off
+      token minted by `POST /api/v1/pairing`, which is scoped to one pairing, one
+      purpose and, for an attendance hand-off, one event and one direction.
+
+      The phone asks the server what it is allowed to do rather than trusting the
+      link it just scanned, so a tampered QR payload cannot make it render a
+      check-out flow for a hand-off that was issued for a check-in.
+
+      Every rejection here is a 401 and the `code` says why:
+      `PAIRING_TOKEN_MISSING` for no `Authorization` header,
+      `PAIRING_EXPIRED` for a token past its five minutes, `PAIRING_INVALID` for
+      a token that is not a hand-off token, and `PAIRING_INACTIVE` for a pairing
+      that was already completed or has lapsed. The pairing row, not the JWT, is
+      the authority: a still-valid signature against a spent pairing is refused.
+    security:
+      - handoffToken: []
+    responses:
+      '200':
+        description: |
+          What to render. `eventId` and `mode` are null and `enroll` respectively
+          for an enrollment hand-off.
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/PairingContextResponse' }
+            example:
+              message: Pairing context.
+              data:
+                scope: ATTENDANCE
+                eventId: 7
+                mode: in
+      '401':
+        description: |
+          Missing, malformed, expired, or spent hand-off token. Branch on `code`:
+          `PAIRING_TOKEN_MISSING`, `PAIRING_EXPIRED`, `PAIRING_INVALID`, or
+          `PAIRING_INACTIVE`.
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/Error' }
+            example:
+              status: error
+              message: This pairing is no longer active. Start again from your laptop.
+              requestId: 3f1c9d2e-5b7a-4c11-9f60-2a8e4d0b7c31
+              code: PAIRING_INACTIVE
+
+/api/v1/pairing/session/challenge:
+  post:
+    tags: [Pairing]
+    operationId: startPairingBatchChallenge
+    summary: Mint a batch liveness challenge on the phone
+    description: |
+      Step one of the single-upload flow. The caller is a phone with no session
+      of its own, authenticated only by the bearer hand-off token, which is
+      scoped to one pairing, one purpose and, for attendance, one event and one
+      direction. The phone therefore does not send an event or a direction: both
+      are read from the token, never from the request.
+
+      The server draws three distinct actions with a CSPRNG and returns them with
+      a single-use signed challenge token. The phone prompts all three locally
+      and then uploads one burst proving them in order.
+
+      This is the fail-fast gate: enrollment, current biometric consent, the
+      scanned venue code, the session window, and the current attendance state
+      are all checked here, before any ML is spent. An enrollment hand-off checks
+      instead that no template already exists.
+
+      Limited to 30 per principal per 15 minutes.
+    security:
+      - handoffToken: []
+    requestBody:
+      required: false
+      content:
+        application/json:
+          schema: { $ref: '#/components/schemas/PairingChallengeRequest' }
+    responses:
+      '200':
+        description: |
+          Challenge issued. Valid for 60 seconds and single use.
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/PairingChallengeResponse' }
+      '400':
+        description: |
+          The gate refused before any capture: no enrolled face, biometric
+          consent that no longer matches the current notice
+          (`BIOMETRIC_CONSENT_STALE`), an invalid or expired venue code, or no
+          session open for this event right now.
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/Error' }
+      '401':
+        description: |
+          The hand-off token is missing, expired, not a pairing token, or its
+          pairing is no longer live. See `GET /api/v1/pairing/session/context`
+          for the `code` values.
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/Error' }
+      '404':
+        description: |
+          The event or the account behind the token no longer exists, or, on a
+          check-out hand-off, there is no check-in to close for this session.
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/Error' }
+      '409':
+        description: |
+          Already checked in for this session, already checked out of it, or, for
+          an enrollment hand-off, a face template already exists and only an
+          administrator can reset it.
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/Error' }
+      '429': { $ref: '#/components/responses/RateLimited' }
+
+/api/v1/pairing/session/capture:
+  post:
+    tags: [Pairing]
+    operationId: submitPairingBatchCapture
+    summary: Upload one burst proving every challenged action
+    description: |
+      Step two of the single-upload flow, and the end of the hand-off. The caller
+      is a phone with no session of its own, holding a bearer token scoped to one
+      pairing, one purpose and, for attendance, one event and one direction. The
+      event and direction used to write the record come from that token, so the
+      form cannot redirect the capture at another event, the other direction, or
+      another account.
+
+      Send 6 to 16 frames in the repeated `frames` field, each up to 1.5 MB. The
+      server runs the face engine over the burst, proves every challenged action
+      was performed in order, and only then commits: an attendance row for an
+      `ATTENDANCE` hand-off, a derived face template for an `ENROLL` one.
+
+      Presence is re-proven here, not only when the challenge was minted.
+      Checking the venue code once at challenge time let a code be photographed,
+      relayed off-site, and the frames uploaded from anywhere for the life of the
+      challenge.
+
+      On success the pairing flips to `COMPLETED` so the laptop's poll sees it.
+      That flip is best effort: the capture has already committed, and a lost
+      race on the status write must never fail the user's check-in.
+
+      A rejected capture does **not** consume the pairing. Too few frames, a
+      failed action, a bad venue code, the phone can retry against the same
+      pairing until it expires.
+
+      Limited to 60 uploads per principal per 15 minutes. Exceeding it also
+      raises a `RAPID_ATTEMPTS` anomaly against the account for review.
+    security:
+      - handoffToken: []
+    requestBody:
+      required: true
+      content:
+        multipart/form-data:
+          schema: { $ref: '#/components/schemas/PairingCaptureUpload' }
+          encoding:
+            frames:
+              contentType: image/jpeg, image/png, image/webp, image/heic, image/heif
+    responses:
+      '200':
+        description: |
+          Verified and committed, and the pairing is now `COMPLETED`. `data`
+          carries the attendance row, or the refreshed account for an enrollment.
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/PairingCaptureResponse' }
+      '400':
+        description: |
+          Frame count outside 6 to 16, a file whose leading bytes are not a real
+          image (`INVALID_IMAGE`), an oversized or over-count upload
+          (`UPLOAD_ERROR`, answered as 400 here rather than 413 because multer's
+          limit errors are mapped to a bad request), an invalid or expired venue
+          code at upload time, a closed check-out window, missing biometric
+          consent on an enrollment, or an enrollment whose frames did not prove a
+          live face.
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/Error' }
+      '401':
+        description: |
+          The hand-off token is missing, expired, or its pairing is spent, the
+          challenge token expired or was already used (`CHALLENGE_EXPIRED`,
+          `CHALLENGE_CONSUMED`, `CHALLENGE_INVALID`), or the attendance liveness
+          check failed. A failed check is recorded as evidence plus an anomaly
+          rather than silently dropped.
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/Error' }
+      '404':
+        description: |
+          The event, the account, or, for a check-out, the active session or the
+          check-in being closed could not be found.
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/Error' }
+      '409':
+        description: |
+          Already checked in for this session, already checked out, or a face
+          template was enrolled between the challenge and this upload.
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/Error' }
+      '429': { $ref: '#/components/responses/RateLimited' }
+
+/api/v1/pairing/session/step-challenge:
+  post:
+    tags: [Pairing]
+    operationId: startPairingStepChallenge
+    summary: Start a guided step-by-step scan on the phone
+    description: |
+      Step one of the guided flow, the one a phone should normally use. The
+      caller is a phone with no session of its own, authenticated only by the
+      bearer hand-off token, which is scoped to one pairing, one purpose and, for
+      attendance, one event and one direction. The event and direction are the
+      token's, never the client's.
+
+      Same gates and same randomized draw as the batch challenge, but the phone
+      proves one action per upload and the server verifies each before prompting
+      the next. That gives the user a retry on a single missed action instead of
+      restarting the whole scan, which matters on a phone held at arm's length.
+
+      The returned token lives five minutes rather than 60 seconds, because the
+      flow spans several verified round-trips. Presence is re-proven at the final
+      step and the challenge is single use, so the wider window does not let a
+      venue code be relayed and reused.
+
+      Limited to 30 per principal per 15 minutes.
+    security:
+      - handoffToken: []
+    requestBody:
+      required: false
+      content:
+        application/json:
+          schema: { $ref: '#/components/schemas/PairingChallengeRequest' }
+    responses:
+      '200':
+        description: |
+          Scan started. Prompt `data.nextAction` and upload the first step.
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/PairingStepChallengeResponse' }
+            example:
+              message: Step-by-step scan started. Perform the first action.
+              data:
+                actions: [BLINK, TURN_RIGHT, SMILE]
+                challengeToken: eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9...
+                currentStep: 0
+                nextAction: BLINK
+                totalSteps: 3
+                expiresAt: '2026-08-04T09:19:22.187Z'
+      '400':
+        description: |
+          No enrolled face, stale biometric consent
+          (`BIOMETRIC_CONSENT_STALE`), an invalid or expired venue code, or no
+          session open for this event right now.
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/Error' }
+      '401':
+        description: |
+          The hand-off token is missing, expired, not a pairing token, or its
+          pairing is no longer live. A pairing that already completed reads as
+          `PAIRING_INACTIVE`, which is what stops one token driving a second
+          scan.
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/Error' }
+      '404':
+        description: |
+          The event or the account no longer exists, or, on a check-out hand-off,
+          there is no check-in to close for this session.
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/Error' }
+      '409':
+        description: |
+          Already checked in, already checked out, or a face template already
+          exists for an enrollment hand-off.
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/Error' }
+      '429': { $ref: '#/components/responses/RateLimited' }
+
+/api/v1/pairing/session/step:
+  post:
+    tags: [Pairing]
+    operationId: submitPairingStep
+    summary: Upload the frames for one prompted action
+    description: |
+      One action per request, repeated until `data.done` is true. The caller is a
+      phone with no session of its own, holding a bearer token scoped to one
+      pairing, one purpose and, for attendance, one event and one direction, and
+      the record is written against the token's event and direction rather than
+      anything in the form.
+
+      Send 4 to 20 frames in the repeated `frames` field, each up to 1.5 MB, plus
+      the unchanged `challengeToken` from the step challenge. Progress is tracked
+      in the challenge row, not in the token, and each step advances it
+      atomically, so a duplicate upload of a step already recorded is a 409 rather
+      than a second advance.
+
+      Nothing is written until the last step. The venue code, the session window,
+      and the attendance state are re-checked at that final commit, which keeps
+      proof of presence attached to the moment of the write. Only then does the
+      pairing flip to `COMPLETED`, and only then does the laptop's poll change.
+      That flip is best effort, because the record has already committed.
+
+      A failed action does not end the scan or consume the pairing: the phone can
+      re-prompt the same action and upload again.
+
+      Limited to 60 uploads per principal per 15 minutes, sized for a
+      several-step scan plus retries. Exceeding it also raises a `RAPID_ATTEMPTS`
+      anomaly against the account.
+    security:
+      - handoffToken: []
+    requestBody:
+      required: true
+      content:
+        multipart/form-data:
+          schema: { $ref: '#/components/schemas/PairingStepUpload' }
+          encoding:
+            frames:
+              contentType: image/jpeg, image/png, image/webp, image/heic, image/heif
+    responses:
+      '200':
+        description: |
+          The action was verified. `data.done` is false with the next action to
+          prompt, or true on the final step, where the attendance row or the new
+          face template is returned and the pairing is marked `COMPLETED`.
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/PairingStepResponse' }
+      '400':
+        description: |
+          Frame count outside 4 to 20, a file that is not really an image
+          (`INVALID_IMAGE`), an oversized or over-count upload (`UPLOAD_ERROR`,
+          answered as 400 rather than 413), an invalid or expired venue code at
+          the final commit, a closed check-out window, missing consent on an
+          enrollment, or a failed enrollment step (`STEP_FAILED`).
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/Error' }
+      '401':
+        description: |
+          The hand-off token is missing, expired, or its pairing is spent, the
+          step challenge expired or was already consumed (`CHALLENGE_EXPIRED`,
+          `CHALLENGE_CONSUMED`, `CHALLENGE_INVALID`), or the attendance action
+          did not verify (`STEP_FAILED`), in which case evidence and an anomaly
+          are recorded.
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/Error' }
+      '404':
+        description: |
+          The event, the account, or, on the final step of a check-out, the
+          active session or the check-in being closed could not be found.
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/Error' }
+      '409':
+        description: |
+          That step was already recorded, so continue with the next action, or
+          the final commit collided with an existing check-in, check-out, or face
+          template.
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/Error' }
+      '429': { $ref: '#/components/responses/RateLimited' }

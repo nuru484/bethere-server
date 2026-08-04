@@ -20,6 +20,7 @@ import {
 } from "./src/middleware/error-handler.js";
 import { prisma } from "./src/config/prisma-client.js";
 import { initSentry } from "./src/lib/sentry.js";
+import { mountApiDocs } from "./src/docs/mount.js";
 
 initSentry();
 
@@ -125,6 +126,11 @@ app.get("/health/ready", async (req, res) => {
     .status(ready ? 200 : 503)
     .json({ status: ready ? "ok" : "error", ...checks });
 });
+
+// Public API reference. Mounted before the versioned router so the docs are
+// reachable without a session, and so a future /api/v1 catch-all can never
+// swallow them.
+mountApiDocs(app);
 
 app.use("/api/v1", routes);
 

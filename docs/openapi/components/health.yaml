@@ -1,0 +1,22 @@
+schemas:
+  ReadinessReport:
+    type: object
+    description: |
+      Per-dependency readiness. `status` is `ok` only when every dependency is
+      up, so a caller can gate on the single field while still being able to
+      read which dependency failed.
+    required: [status, db, redis]
+    properties:
+      status:
+        type: string
+        enum: [ok, error]
+      db:
+        type: string
+        enum: [up, down]
+      redis:
+        type: string
+        description: |
+          Reported `up` when Redis is reachable or not configured at all. A
+          deployment that runs without a shared Redis is a valid configuration,
+          not a degraded one, so it must not hold readiness down.
+        enum: [up, down]

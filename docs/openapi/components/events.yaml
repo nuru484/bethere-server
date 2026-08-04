@@ -1,0 +1,511 @@
+# Events domain: the event record and its venue, the request bodies for the
+# dual JSON/multipart write endpoints, the attendant-only viewer context, and
+# the rotating venue codes that prove on-site presence.
+
+schemas:
+  EventLocation:
+    type: object
+    description: |
+      Where the event happens. Stored as its own row because the search box
+      matches on venue name, city, and country as well as on the event itself.
+    required: [id, name, createdAt, updatedAt]
+    properties:
+      id: { type: integer, examples: [7] }
+      name: { type: string, maxLength: 255, examples: [Main Hall] }
+      city:
+        type: [string, 'null']
+        maxLength: 100
+        examples: [Accra]
+      country:
+        type: [string, 'null']
+        maxLength: 100
+        examples: [Ghana]
+      createdAt: { type: string, format: date-time }
+      updatedAt: { type: string, format: date-time }
+
+  EventLocationInput:
+    type: object
+    description: |
+      The venue to attach. There is no endpoint for managing locations on their
+      own: each event carries its venue inline, and the server decides whether
+      to edit the existing row or mint a new one.
+    required: [name]
+    properties:
+      name:
+        type: string
+        maxLength: 255
+        description: Required whenever `location` is present, even on a partial update.
+        examples: [Main Hall]
+      city: { type: string, maxLength: 100, examples: [Accra] }
+      country: { type: string, maxLength: 100, examples: [Ghana] }
+
+  EventTimeOfDay:
+    type: string
+    pattern: '^([01][0-9]|2[0-3]):[0-5][0-9]$'
+    description: |
+      A wall-clock time on the venue's calendar day, two-digit `HH:MM`. It is
+      not a timestamp: the same window is reapplied to every occurrence of a
+      recurring event, so it is stored as text rather than as an instant.
+    examples: ['06:00']
+
+  Event:
+    type: object
+    description: |
+      An event: the thing attendance is recorded against. Sessions, one per
+      day the event covers, are generated from this shape by a background
+      worker, and check-in is only open inside a session's daily window.
+
+      `venueSecret` is stripped from every query result at the database client,
+      so it can never appear here. Without it the rotating codes cannot be
+      derived, which is what keeps presence unforgeable by a modified client.
+    required:
+      [id, title, startDate, isRecurring, recurrenceInterval, durationDays,
+       startTime, endTime, archived, type, locationId, location, createdAt, updatedAt]
+    properties:
+      id: { type: integer, examples: [42] }
+      title:
+        type: string
+        maxLength: 255
+        description: |
+          Stored HTML-escaped: `&`, `<`, `>`, `"` and `'` are written as
+          entities, so a title rendered into a page or a report cell can never
+          inject markup. Clients that render into a text node should unescape.
+        examples: [Team Retreat]
+      description:
+        type: [string, 'null']
+        maxLength: 500
+        description: Escaped on the same terms as `title`.
+      startDate:
+        type: string
+        format: date-time
+        description: |
+          The first day the event runs. Session rows are keyed on UTC midnight
+          of this day, so a time component here is ignored by the planner.
+      endDate:
+        type: [string, 'null']
+        format: date-time
+        description: |
+          The last day the event runs. Null only for recurring events, which
+          may run indefinitely; a non-recurring event always has one.
+      isRecurring:
+        type: boolean
+        description: |
+          Whether the event repeats. Recurring events keep generating
+          occurrences every `recurrenceInterval` days until `endDate` passes.
+        examples: [false]
+      recurrenceInterval:
+        type: integer
+        minimum: 1
+        description: |
+          Days between the start of one occurrence and the start of the next.
+          Must be at least `durationDays`, otherwise the next occurrence would
+          begin on a day the current one already owns a session for and
+          generation stalls there permanently.
+        examples: [7]
+      durationDays:
+        type: integer
+        minimum: 1
+        description: |
+          How many days one occurrence lasts. Server-owned for non-recurring
+          events: it is recomputed from `startDate` to `endDate` inclusive, so
+          a value sent by the client is overwritten rather than trusted.
+        examples: [3]
+      startTime: { $ref: '#/components/schemas/EventTimeOfDay' }
+      endTime: { $ref: '#/components/schemas/EventTimeOfDay' }
+      archived:
+        type: boolean
+        description: |
+          Archived events stay visible to administrators for reporting but are
+          hidden from attendants, because check-in on them is closed and
+          listing them only invites dead-end taps. Not settable through these
+          endpoints.
+        examples: [false]
+      coverImage:
+        type: [string, 'null']
+        format: uri
+        description: |
+          Cloudinary URL of the uploaded cover. Only ever written from an
+          uploaded file part, never from a client-supplied string.
+      deletedAt:
+        type: 'null'
+        description: |
+          Always null on the wire. Deletion is a soft delete and every read is
+          scoped to undeleted rows, so a deleted event reads as absent rather
+          than as a row with a timestamp here.
+      type:
+        type: string
+        description: |
+          Free-text category, escaped like `title`. Doubles as an exact-match
+          list filter, so clients should reuse the exact spellings already in
+          the data.
+        examples: [MEETING]
+      locationId: { type: integer, examples: [7] }
+      location: { $ref: '#/components/schemas/EventLocation' }
+      createdAt: { type: string, format: date-time }
+      updatedAt: { type: string, format: date-time }
+
+  EventCurrentSession:
+    type: [object, 'null']
+    description: |
+      Today's session for this event on the venue calendar, or null when the
+      event does not run today. Its presence is what tells a client the sign-in
+      button is worth showing at all.
+    required: [id, startDate, endDate]
+    properties:
+      id: { type: integer, examples: [310] }
+      startDate: { type: string, format: date-time }
+      endDate: { type: string, format: date-time }
+
+  EventViewerAttendance:
+    type: [object, 'null']
+    description: |
+      The calling attendant's own attendance row for `currentSession`, or null
+      if they have not checked in yet. Only their own row is ever returned
+      here, so the event list cannot be used to see who else attended.
+    required: [sessionId, status, checkInTime, checkOutTime, autoCheckedOut]
+    properties:
+      sessionId: { type: integer, examples: [310] }
+      status:
+        type: string
+        enum: [PRESENT, LATE, ABSENT]
+        description: |
+          ABSENT rows are written by the finalizer after the day closes and
+          carry no check-in time.
+        examples: [PRESENT]
+      checkInTime:
+        type: [string, 'null']
+        format: date-time
+      checkOutTime:
+        type: [string, 'null']
+        format: date-time
+      autoCheckedOut:
+        type: boolean
+        description: |
+          True when the finalizer closed the attendance because the person
+          never signed out. Part of the contract so the client can label a
+          system sign-out as such instead of implying a real face-verified
+          check-out.
+        examples: [false]
+
+  EventWithViewerContext:
+    description: |
+      An event as an attendant sees it. The two context fields are resolved
+      server-side in two batched queries for the whole page, so an event grid
+      costs no per-card attendance request. They are absent, not null, for
+      administrator viewers, who have no attendance of their own to report.
+    allOf:
+      - $ref: '#/components/schemas/Event'
+      - type: object
+        properties:
+          currentSession: { $ref: '#/components/schemas/EventCurrentSession' }
+          viewerAttendance: { $ref: '#/components/schemas/EventViewerAttendance' }
+
+  EventSessionSummary:
+    type: object
+    description: One generated session day of an event.
+    required: [id, eventId, startDate, endDate, startTime, endTime]
+    properties:
+      id: { type: integer, examples: [310] }
+      eventId: { type: integer, examples: [42] }
+      startDate: { type: string, format: date-time }
+      endDate: { type: string, format: date-time }
+      startTime:
+        type: string
+        format: date-time
+        description: The daily window's opening instant for this specific day.
+      endTime: { type: string, format: date-time }
+      finalizedAt:
+        type: [string, 'null']
+        format: date-time
+        description: |
+          Stamped once the day's window plus grace has closed and absences have
+          been written. Null means the day is still open or not yet swept.
+      createdAt: { type: string, format: date-time }
+      updatedAt: { type: string, format: date-time }
+
+  EventWithLatestSession:
+    description: |
+      The update response. It carries `sessions` holding at most the single
+      most recent session, which is what a client needs to tell whether the
+      edit left the event with a live day or whether the worker still has to
+      rebuild it.
+    allOf:
+      - $ref: '#/components/schemas/Event'
+      - type: object
+        required: [sessions]
+        properties:
+          sessions:
+            type: array
+            maxItems: 1
+            items: { $ref: '#/components/schemas/EventSessionSummary' }
+
+  EventCreateRequest:
+    type: object
+    description: |
+      The JSON form of a create. Only the fields listed here are read: anything
+      else in the body, including `archived`, `deletedAt`, `venueSecret` and the
+      timestamps, is dropped before the write, so no client can mass-assign its
+      way past a domain guard.
+    required: [title, startDate, startTime, endTime, type, location]
+    properties:
+      title: { type: string, maxLength: 255, examples: [Team Retreat] }
+      description: { type: string, maxLength: 500 }
+      startDate:
+        type: string
+        format: date-time
+        description: ISO 8601. The first day the event runs.
+        examples: ['2026-09-01T00:00:00.000Z']
+      endDate:
+        type: string
+        format: date-time
+        description: |
+          ISO 8601, on or after `startDate`. Required unless `isRecurring` is
+          true: without an end a one-off event has no defined length, and
+          `durationDays` could not be derived.
+        examples: ['2026-09-03T00:00:00.000Z']
+      startTime: { $ref: '#/components/schemas/EventTimeOfDay' }
+      endTime:
+        allOf:
+          - $ref: '#/components/schemas/EventTimeOfDay'
+        description: |
+          Must be strictly after `startTime`. An inverted window never opens,
+          which would leave the event permanently un-checkable.
+      isRecurring: { type: boolean, default: false }
+      recurrenceInterval:
+        type: integer
+        minimum: 1
+        description: |
+          Rejected when it is shorter than `durationDays` on a recurring event.
+        examples: [7]
+      durationDays:
+        type: integer
+        minimum: 1
+        description: |
+          Honoured for recurring events only. For a non-recurring event it is
+          overwritten with the inclusive day count of the date range.
+      type: { type: string, examples: [MEETING] }
+      location: { $ref: '#/components/schemas/EventLocationInput' }
+
+  EventCreateMultipartRequest:
+    type: object
+    description: |
+      The multipart form of the same create. Every value arrives as text, so
+      `location` must be sent JSON-stringified and is parsed back server-side,
+      and the boolean and integer fields are coerced from their string forms.
+      A `coverImage` body field is ignored here: only the file part can write
+      the column.
+    required: [title, startDate, startTime, endTime, type, location]
+    properties:
+      title: { type: string, maxLength: 255, examples: [Conference] }
+      description: { type: string, maxLength: 500 }
+      startDate: { type: string, format: date-time }
+      endDate: { type: string, format: date-time }
+      startTime: { $ref: '#/components/schemas/EventTimeOfDay' }
+      endTime: { $ref: '#/components/schemas/EventTimeOfDay' }
+      isRecurring:
+        type: boolean
+        description: Sent as the text `true` or `false` and coerced server-side.
+      recurrenceInterval: { type: integer, minimum: 1 }
+      durationDays: { type: integer, minimum: 1 }
+      type: { type: string, examples: [CONFERENCE] }
+      location:
+        type: string
+        description: |
+          The `EventLocationInput` object, `JSON.stringify`-ed. An unparsable
+          string is reported as `Location must be a JSON object.` rather than
+          being silently ignored.
+        examples: ['{"name":"Expo Center","city":"Accra"}']
+      coverImage:
+        type: string
+        format: binary
+        description: |
+          The cover image file part. At most 5 MB, and JPEG, PNG, WEBP, HEIC or
+          HEIF only. The declared mimetype is not trusted: the leading bytes of
+          the upload are checked against real image signatures before it is sent
+          anywhere, so a non-image renamed to `.jpg` is still rejected.
+
+  EventUpdateRequest:
+    type: object
+    description: |
+      A partial update in JSON. Every field is optional and only the ones
+      present are written, on the same whitelist as create. Omitting a field
+      leaves the stored value alone.
+    properties:
+      title: { type: string, maxLength: 255 }
+      description: { type: string, maxLength: 500 }
+      startDate:
+        type: string
+        format: date-time
+        description: |
+          Locked once any attendance exists for the event: restating the same
+          value is accepted, changing it is refused, because moving the date
+          would strand history against days the event no longer covers.
+      endDate:
+        type: [string, 'null']
+        format: date-time
+        description: |
+          Still required whenever the merged shape is non-recurring, even if
+          `isRecurring` comes from the stored row rather than this body.
+      startTime: { $ref: '#/components/schemas/EventTimeOfDay' }
+      endTime: { $ref: '#/components/schemas/EventTimeOfDay' }
+      isRecurring:
+        type: boolean
+        description: |
+          Setting this to true is the only edit a passed non-recurring event
+          accepts: it converts the event rather than resurrecting a finished
+          one.
+      recurrenceInterval: { type: integer, minimum: 1 }
+      durationDays: { type: integer, minimum: 1 }
+      type: { type: string }
+      coverImage:
+        type: string
+        const: ''
+        description: |
+          Accepts the empty string and nothing else. It exists purely as the
+          remove signal: sending `""` clears the column and deletes the stored
+          asset. Any other string is rejected, so a client can never write an
+          arbitrary URL into the column. To replace the image, send a file part
+          instead.
+      location:
+        allOf:
+          - $ref: '#/components/schemas/EventLocationInput'
+        description: |
+          Replaces the whole venue. If the current location row is shared with
+          another event, a fresh row is created instead of editing it in place,
+          so renaming this event's venue never silently renames another's.
+
+  EventUpdateMultipartRequest:
+    type: object
+    description: |
+      The multipart form of a partial update. As with create, `location` is
+      sent JSON-stringified and parsed server-side, scalars arrive as text and
+      are coerced, and the cover image travels as a file part.
+    properties:
+      title: { type: string, maxLength: 255 }
+      description: { type: string, maxLength: 500 }
+      startDate: { type: string, format: date-time }
+      endDate: { type: string, format: date-time }
+      startTime: { $ref: '#/components/schemas/EventTimeOfDay' }
+      endTime: { $ref: '#/components/schemas/EventTimeOfDay' }
+      isRecurring: { type: boolean }
+      recurrenceInterval: { type: integer, minimum: 1 }
+      durationDays: { type: integer, minimum: 1 }
+      type: { type: string }
+      location:
+        type: string
+        description: The `EventLocationInput` object, `JSON.stringify`-ed.
+        examples: ['{"name":"Expo Center","city":"Accra"}']
+      coverImage:
+        type: string
+        format: binary
+        description: |
+          The replacement cover image file part. At most 5 MB, and JPEG, PNG,
+          WEBP, HEIC or HEIF only, verified by inspecting the leading bytes
+          rather than by trusting the declared mimetype. Uploading one replaces
+          the current cover and deletes the old asset. Send the field as an
+          empty text value instead to remove the cover without uploading
+          anything.
+
+  EventResponse:
+    type: object
+    description: The single-event envelope.
+    required: [message, data]
+    properties:
+      message: { type: string, examples: [Event successfully fetched.] }
+      data: { $ref: '#/components/schemas/EventWithViewerContext' }
+
+  EventListResponse:
+    type: object
+    description: |
+      The paginated event list. On an empty page the message switches to the
+      empty-state wording and `meta.total` is reported as 0, so a client can
+      render the empty state without a second check.
+    required: [message, data, meta]
+    properties:
+      message: { type: string, examples: [Events successfully fetched.] }
+      data:
+        type: array
+        items: { $ref: '#/components/schemas/EventWithViewerContext' }
+      meta: { $ref: '#/components/schemas/PaginationMeta' }
+
+  EventVenueCode:
+    type: object
+    description: |
+      One rotating code together with the window it is valid for. The window
+      bounds let the venue display switch codes on its own clock instead of
+      asking the server when to rotate.
+    required: [code, validFrom, validTo]
+    properties:
+      code:
+        type: string
+        pattern: '^[0-9a-f]{16}$'
+        description: |
+          16 lowercase hex characters, 64 bits of a keyed hash of the event's
+          secret and the window index. Long enough to be unguessable inside a
+          30 second window, short enough to render as a crisp QR code.
+        examples: [a3f19c4b7e20d581]
+      validFrom: { type: string, format: date-time }
+      validTo: { type: string, format: date-time }
+
+  EventVenueCodesResponse:
+    type: object
+    description: |
+      A batch of upcoming venue codes for one event's display, oldest first
+      starting with the code valid right now.
+    required: [message, data]
+    properties:
+      message: { type: string, examples: [Venue codes issued.] }
+      data:
+        type: object
+        required: [eventId, periodMs, codes]
+        properties:
+          eventId: { type: integer, examples: [42] }
+          periodMs:
+            type: integer
+            description: |
+              How long each code stays valid, currently 30000 ms. The display
+              advances to the next entry on this cadence.
+            examples: [30000]
+          codes:
+            type: array
+            description: |
+              20 consecutive codes, about ten minutes of rotation, so the
+              display fetches a batch rather than polling every 30 seconds.
+            items: { $ref: '#/components/schemas/EventVenueCode' }
+
+parameters:
+  EventId:
+    name: eventId
+    in: path
+    required: true
+    description: |
+      Numeric id of the event. A value that is not a number is rejected as a
+      validation failure rather than being looked up.
+    schema:
+      type: integer
+      minimum: 1
+    example: 42
+
+  EventTypeFilter:
+    name: type
+    in: query
+    required: false
+    description: |
+      Exact match on the event category. Unlike `search` this is not a
+      substring match, so it is the filter to use behind a category dropdown
+      populated from existing values.
+    schema:
+      type: string
+    example: MEETING
+
+  EventLocationFilter:
+    name: location
+    in: query
+    required: false
+    description: |
+      Case-insensitive substring match across the venue's name, city, and
+      country, so a single "Accra" narrows to a city without the caller having
+      to know which column holds it.
+    schema:
+      type: string
+    example: Accra

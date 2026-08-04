@@ -1,0 +1,381 @@
+/api/v1/events:
+  post:
+    tags: [Events]
+    operationId: createEvent
+    summary: Create an event
+    description: |
+      **ADMIN only.** Attendants may read events but never create them.
+
+      Creates the event together with its venue in one write, mints the
+      per-event venue secret the rotating on-site codes are derived from, and
+      queues the first session: delayed until the start date if that is still
+      in the future, immediate otherwise. Queueing is best effort and never
+      fails the request, because the scheduler's daily sweep picks up any event
+      that ended up without sessions.
+
+      Only the documented fields are read from the body. `archived`,
+      `deletedAt`, `venueSecret` and the timestamps are dropped, so no client
+      can mass-assign past a domain guard.
+
+      **Two content types.** `application/json` takes `location` as a nested
+      object. `multipart/form-data` exists so a cover image can travel with the
+      event: there every value arrives as text, so `location` must be sent
+      `JSON.stringify`-ed and is parsed back before validation, while
+      `isRecurring`, `recurrenceInterval` and `durationDays` are coerced from
+      their string forms. `coverImage` is a file part only. A `coverImage`
+      *body* field is ignored on create, so no client-typed URL can reach the
+      column.
+
+      **Schedule rules enforced here.** `endTime` must be after `startTime`, or
+      the daily window never opens and the event is permanently un-checkable.
+      `endDate` must be on or after `startDate`. A non-recurring event must
+      have an `endDate`, and its `durationDays` is recomputed from the
+      inclusive date range rather than taken from the body. On a recurring
+      event `recurrenceInterval` must be at least `durationDays`, otherwise the
+      next occurrence would begin on a day the current one already owns a
+      session for and generation stalls there forever.
+    requestBody:
+      required: true
+      content:
+        application/json:
+          schema: { $ref: '#/components/schemas/EventCreateRequest' }
+        multipart/form-data:
+          schema: { $ref: '#/components/schemas/EventCreateMultipartRequest' }
+          encoding:
+            coverImage:
+              contentType: image/jpeg, image/png, image/webp, image/heic, image/heif
+    responses:
+      '201':
+        description: |
+          Created. The event is returned with its location attached, and with
+          `coverImage` already set to the uploaded asset's URL when a file part
+          was sent.
+        headers:
+          X-Request-Id: { $ref: '#/components/headers/XRequestId' }
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [message, data]
+              properties:
+                message: { type: string, examples: [Event created successfully] }
+                data: { $ref: '#/components/schemas/Event' }
+      '400':
+        description: |
+          A field failed validation (`VALIDATION_ERROR`, with `details.errors`),
+          a schedule rule was broken (a missing `endDate` on a non-recurring
+          event, an inverted window or date range, or a recurrence interval
+          shorter than the occurrence), the upload was not a real image
+          (`INVALID_IMAGE`), or the file exceeded 5 MB or was not an accepted
+          image type (`UPLOAD_ERROR`). Upload limits answer 400 rather than
+          413.
+        headers:
+          X-Request-Id: { $ref: '#/components/headers/XRequestId' }
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/Error' }
+            example:
+              status: error
+              message: Validation Error
+              requestId: 3f1c9d2e-5b7a-4c11-9f60-2a8e4d0b7c31
+              code: VALIDATION_ERROR
+              details:
+                errors:
+                  - field: endTime
+                    message: endTime must be after startTime.
+      '401': { $ref: '#/components/responses/Unauthorized' }
+      '403': { $ref: '#/components/responses/Forbidden' }
+
+  get:
+    tags: [Events]
+    operationId: listEvents
+    summary: List events
+    description: |
+      **ADMIN and USER.** Both roles read the same list, but not the same rows
+      and not the same shape.
+
+      Administrators see every event, archived ones included, because archived
+      events still matter for management and reporting. Attendants never see
+      archived events: check-in on them is closed, so listing them would only
+      invite dead-end taps.
+
+      For an attendant each row also carries `currentSession` and
+      `viewerAttendance`, the caller's own state for today. Both are resolved
+      for the whole page in two batched queries, which is what lets an event
+      grid render its sign-in and sign-out buttons without one attendance
+      request per card. For an administrator the two fields are absent
+      entirely, not null.
+
+      Ordered newest-created first. `search` is one box over everything a user
+      might type: title, description, type, and the venue's name, city, and
+      country.
+    parameters:
+      - $ref: '#/components/parameters/Page'
+      - $ref: '#/components/parameters/Limit'
+      - $ref: '#/components/parameters/Search'
+      - $ref: '#/components/parameters/EventTypeFilter'
+      - $ref: '#/components/parameters/EventLocationFilter'
+    responses:
+      '200':
+        description: |
+          A page of events. When the page is empty the message becomes
+          `There are no events at the moment.` and `meta.total` is reported as
+          0.
+        headers:
+          X-Request-Id: { $ref: '#/components/headers/XRequestId' }
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/EventListResponse' }
+      '400':
+        description: |
+          A free-text filter was not a scalar, for example `?search[]=x`. Such
+          a value is rejected as `Invalid search term.` rather than reaching the
+          query layer as an array.
+        headers:
+          X-Request-Id: { $ref: '#/components/headers/XRequestId' }
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/Error' }
+      '401': { $ref: '#/components/responses/Unauthorized' }
+
+/api/v1/events/{eventId}:
+  parameters:
+    - $ref: '#/components/parameters/EventId'
+
+  get:
+    tags: [Events]
+    operationId: getEventById
+    summary: Get one event
+    description: |
+      **ADMIN and USER.**
+
+      Returns the event with its venue. For an attendant caller it also carries
+      `currentSession` and `viewerAttendance`, the same viewer context the list
+      attaches, so an event detail screen needs no follow-up request to decide
+      what to offer. Administrators get the bare event: they have no attendance
+      of their own to report.
+
+      Soft-deleted events read as absent, so a deleted event answers 404 rather
+      than returning a tombstone.
+    responses:
+      '200':
+        description: The event.
+        headers:
+          X-Request-Id: { $ref: '#/components/headers/XRequestId' }
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/EventResponse' }
+      '400':
+        description: The path segment was not a valid numeric event id.
+        headers:
+          X-Request-Id: { $ref: '#/components/headers/XRequestId' }
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/Error' }
+      '401': { $ref: '#/components/responses/Unauthorized' }
+      '404': { $ref: '#/components/responses/NotFound' }
+
+  put:
+    tags: [Events]
+    operationId: updateEvent
+    summary: Update an event
+    description: |
+      **ADMIN only.**
+
+      A partial update: every field is optional and only the ones present are
+      written, on the same whitelist as create.
+
+      **Two content types**, exactly as on create. Under
+      `multipart/form-data` the `location` field arrives JSON-stringified and is
+      parsed server-side, scalars arrive as text and are coerced, and
+      `coverImage` is a file part.
+
+      **Cover image semantics.** A file part replaces the cover and the old
+      Cloudinary asset is deleted once the row change has stuck. A `coverImage`
+      *body* field set to the empty string clears the column and deletes the
+      asset. Any other body string is rejected, so no client can write an
+      arbitrary URL into the column. Omitting the field entirely leaves the
+      cover untouched.
+
+      **Rules that protect attendance history.** Once any attendance exists for
+      the event, `startDate` is locked: restating the same value is fine,
+      changing it is refused, because moving the date would strand recorded
+      attendance on days the event no longer covers. A non-recurring event
+      whose end date has passed refuses every edit except setting
+      `isRecurring` to true, and that conversion may not move the start date
+      either. The recurrence and coherence rules are re-checked against the
+      *merged* values, so a shape assembled across two partial updates is
+      caught even though neither request body contained both halves.
+
+      **Session side effects.** When a schedule-shaping field changes on an
+      event with no attendance, the existing sessions are deleted in the same
+      transaction as the update and the worker rebuilds them from the new
+      shape. Leaving them in place used to strand the event with check-in open
+      on days it no longer covered. Requeueing is best effort and never fails
+      the request.
+
+      **Venue changes.** Supplying `location` replaces the venue. If the
+      current location row is shared with another event, a fresh row is created
+      instead of being edited in place, so this event's rename cannot silently
+      rename another event's venue.
+    requestBody:
+      required: true
+      content:
+        application/json:
+          schema: { $ref: '#/components/schemas/EventUpdateRequest' }
+        multipart/form-data:
+          schema: { $ref: '#/components/schemas/EventUpdateMultipartRequest' }
+          encoding:
+            coverImage:
+              contentType: image/jpeg, image/png, image/webp, image/heic, image/heif
+    responses:
+      '200':
+        description: |
+          Updated. The response adds `sessions`, holding at most the single
+          most recent session, so a client can tell whether the event still has
+          a live day or is waiting on a rebuild.
+        headers:
+          X-Request-Id: { $ref: '#/components/headers/XRequestId' }
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [message, data]
+              properties:
+                message: { type: string, examples: [Event updated successfully] }
+                data: { $ref: '#/components/schemas/EventWithLatestSession' }
+      '400':
+        description: |
+          A field failed validation, the event id was not numeric, a history
+          rule was broken (locked start date, a passed one-off event, a missing
+          `endDate` on a merged non-recurring shape, a recurrence interval
+          shorter than the occurrence), `coverImage` carried anything other
+          than an empty string, or the upload was rejected (`INVALID_IMAGE`,
+          or `UPLOAD_ERROR` for an oversized or non-image file).
+        headers:
+          X-Request-Id: { $ref: '#/components/headers/XRequestId' }
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/Error' }
+            example:
+              status: error
+              message: Cannot update the start date of an event that already has attendance records.
+              requestId: 3f1c9d2e-5b7a-4c11-9f60-2a8e4d0b7c31
+      '401': { $ref: '#/components/responses/Unauthorized' }
+      '403': { $ref: '#/components/responses/Forbidden' }
+      '404': { $ref: '#/components/responses/NotFound' }
+
+  delete:
+    tags: [Events]
+    operationId: deleteEvent
+    summary: Delete an event
+    description: |
+      **ADMIN only.**
+
+      A soft delete: the event disappears from every list and every read, but
+      its row survives so the sessions and attendance beneath it stay
+      queryable for reports.
+
+      Refused outright once attendance exists. Removing such an event, even
+      softly, would leave recorded presence hanging off something no
+      administrator can inspect any more, so the caller is told to archive it
+      instead.
+    responses:
+      '200':
+        description: Soft-deleted. Nothing to return.
+        headers:
+          X-Request-Id: { $ref: '#/components/headers/XRequestId' }
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/MessageResponse' }
+            example:
+              message: Event deleted successfully.
+      '400':
+        description: |
+          The event id was not numeric, or the event has attendance records and
+          must be archived rather than deleted.
+        headers:
+          X-Request-Id: { $ref: '#/components/headers/XRequestId' }
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/Error' }
+            example:
+              status: error
+              message: Cannot delete an event that has attendance records. Please archive the event instead to preserve historical data.
+              requestId: 3f1c9d2e-5b7a-4c11-9f60-2a8e4d0b7c31
+      '401': { $ref: '#/components/responses/Unauthorized' }
+      '403': { $ref: '#/components/responses/Forbidden' }
+      '404': { $ref: '#/components/responses/NotFound' }
+
+/api/v1/events/{eventId}/venue-codes:
+  parameters:
+    - $ref: '#/components/parameters/EventId'
+
+  get:
+    tags: [Events]
+    operationId: getEventVenueCodes
+    summary: Fetch the rotating venue codes for an event's display
+    description: |
+      **ADMIN only, and this restriction is the point of the endpoint.**
+
+      The rotating venue code is one of the two proofs BeThere requires before
+      it records attendance. A screen at the location renders the current code
+      as a QR that changes every 30 seconds; scanning it is what demonstrates
+      the person was physically at the venue, while the server-side face check
+      demonstrates who they are. Neither proof is sufficient alone, and the
+      venue code is the half a remote attendant cannot obtain.
+
+      That makes this response the presence secret in readable form. Anyone
+      holding a live code can check in from anywhere, and anyone holding a
+      batch can do so for the next ten minutes, which is precisely the fraud
+      the system exists to prevent. So it is restricted to administrators, who
+      are the people operating the venue display in the first place. Attendants
+      receive 403. The underlying `venueSecret` is stripped from every database
+      read and is never returned by any endpoint: without it, past codes reveal
+      nothing about future ones.
+
+      The codes are stateless. Each is a truncated keyed hash of the event's
+      secret and the time-window index, so nothing is written or polled to
+      rotate them. The display fetches a batch of 20, about ten minutes of
+      rotation, and cycles locally on its own clock, which keeps the ongoing
+      database cost of an idle venue at zero. Validation on check-in simply
+      recomputes the current window's value and accepts one window either side
+      to absorb clock skew between the display and the server.
+
+      An event that has no venue secret yet, which is any event predating the
+      feature, gains one lazily here under a guarded claim, so two callers
+      racing to open the display cannot mint competing secrets and invalidate
+      each other's batch.
+    responses:
+      '200':
+        description: |
+          A batch of upcoming codes, starting with the one valid right now.
+          Each entry carries its own validity window so the display knows when
+          to switch without asking again.
+        headers:
+          X-Request-Id: { $ref: '#/components/headers/XRequestId' }
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/EventVenueCodesResponse' }
+            example:
+              message: Venue codes issued.
+              data:
+                eventId: 42
+                periodMs: 30000
+                codes:
+                  - code: a3f19c4b7e20d581
+                    validFrom: '2026-09-01T09:00:00.000Z'
+                    validTo: '2026-09-01T09:00:30.000Z'
+                  - code: 6b0d2e77c41a9f38
+                    validFrom: '2026-09-01T09:00:30.000Z'
+                    validTo: '2026-09-01T09:01:00.000Z'
+      '400':
+        description: The path segment was not a valid numeric event id.
+        headers:
+          X-Request-Id: { $ref: '#/components/headers/XRequestId' }
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/Error' }
+      '401': { $ref: '#/components/responses/Unauthorized' }
+      '403': { $ref: '#/components/responses/Forbidden' }
+      '404': { $ref: '#/components/responses/NotFound' }

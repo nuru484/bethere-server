@@ -1,0 +1,347 @@
+# Face scan enrollment: the challenge envelopes, the multipart capture bodies,
+# and the enrollment-state responses.
+#
+# Nothing in this file carries a face template. The enrolled descriptor is 128
+# floats derived on the server, AES-256-GCM encrypted before it reaches the
+# database, and decrypted in memory only at match time, so the widest biometric
+# surface any client ever sees is the boolean `hasFaceScan`.
+
+schemas:
+  FaceLivenessAction:
+    type: string
+    description: |
+      One prompted movement in a liveness challenge. Each maps to a check the
+      server can re-prove from the uploaded frames: the two turns from head yaw,
+      `BLINK` from a dip in eye-aspect-ratio against the user's own open-eye
+      baseline, `SMILE` from the expression net. They are transitions rather
+      than poses, which is precisely why a printed photo or a still on a second
+      screen cannot satisfy them.
+    enum: [TURN_LEFT, TURN_RIGHT, BLINK, SMILE]
+
+  FaceChallengeToken:
+    type: string
+    description: |
+      The signed, single-use token returned by a challenge endpoint and echoed
+      back with the frames. It binds the capture to one principal, one purpose
+      (enrollment, never a check-in) and one nonce, and the authoritative action
+      list lives in the database row rather than in the token, so editing the
+      token cannot change what has to be proven.
+    examples: ['eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJ1c2VySWQiOjEyfQ.sIgNaTuRe']
+
+  FaceLivenessFailureReason:
+    type: string
+    description: |
+      Why a capture was not accepted as a live face. Returned as diagnostics
+      rather than as a contract: they exist so a support engineer can tell a
+      genuinely bad capture from a rejected attack, and so the client can prompt
+      the user usefully instead of saying "try again".
+
+      `insufficient_usable_frames` means too few frames contained exactly one
+      clearly detected face. `action_not_satisfied` means a prompted action was
+      never proven, or was proven out of order. `duplicate_frames` and
+      `insufficient_variation` mean the burst was largely the same image
+      repeated, which is what padding a capture with stills looks like.
+      `insufficient_motion` means the challenged signal never moved across the
+      burst, so a head frozen at an angle or a held grin fails even when one
+      frame clears the threshold. `inconsistent_identity` means the frames were
+      not all the same person, `identity_mismatch` and `identity_discontinuity`
+      mean the capture drifted away from the reference face mid-sequence, and
+      `replay_suspected` means the capture matched a stored template too
+      perfectly to be a second live capture.
+    enum:
+      - insufficient_usable_frames
+      - action_not_satisfied
+      - duplicate_frames
+      - insufficient_motion
+      - insufficient_variation
+      - inconsistent_identity
+      - identity_mismatch
+      - identity_discontinuity
+      - replay_suspected
+
+  FaceLivenessRejection:
+    description: |
+      A 400 raised because the capture did not prove a live face. It is the
+      ordinary error envelope; the diagnostics ride in `details`, which is
+      populated outside production only, because in production `details` is
+      reserved for validation failures. The failure is also written to the audit
+      trail as `FACE_ENROLL_FAILED`, so a spike of them is visible even where
+      the response says nothing.
+    allOf:
+      - $ref: '#/components/schemas/Error'
+      - type: object
+        properties:
+          details:
+            type: object
+            properties:
+              reasons:
+                type: array
+                items: { $ref: '#/components/schemas/FaceLivenessFailureReason' }
+              failedActions:
+                type: array
+                description: The prompted actions that could not be proven, batch capture only.
+                items: { $ref: '#/components/schemas/FaceLivenessAction' }
+              action:
+                description: The single action under test, step-by-step capture only.
+                allOf:
+                  - $ref: '#/components/schemas/FaceLivenessAction'
+
+  FaceEnrollmentChallenge:
+    type: object
+    description: |
+      A batch enrollment challenge: the actions to perform, the token that ties
+      the capture to them, and the moment the whole thing goes stale.
+    required: [actions, challengeToken, expiresAt]
+    properties:
+      actions:
+        type: array
+        description: |
+          Three distinct actions drawn with a CSPRNG, in the order they must be
+          performed. The client prompts them one after another and the server
+          re-proves them in this same order from the frames, so a capture
+          recorded before the draw cannot satisfy them.
+        minItems: 3
+        maxItems: 3
+        items: { $ref: '#/components/schemas/FaceLivenessAction' }
+        examples:
+          - [BLINK, TURN_LEFT, SMILE]
+      challengeToken: { $ref: '#/components/schemas/FaceChallengeToken' }
+      expiresAt:
+        type: string
+        format: date-time
+        description: |
+          60 seconds after issue. Deliberately short: the same challenge
+          machinery guards check-in, where a longer window would widen the
+          period in which a venue code could be relayed off-site.
+
+  FaceEnrollmentChallengeResponse:
+    type: object
+    required: [message, data]
+    properties:
+      message:
+        type: string
+        examples: [Perform the actions shown to register your face.]
+      data: { $ref: '#/components/schemas/FaceEnrollmentChallenge' }
+
+  FaceEnrollmentStepChallenge:
+    type: object
+    description: |
+      A step-by-step enrollment challenge. Same randomized draw as the batch
+      flow, but the client proves one action per upload and waits for the server
+      to accept it before prompting the next, which is why its lifetime is
+      minutes rather than seconds.
+    required: [actions, challengeToken, currentStep, nextAction, totalSteps, expiresAt]
+    properties:
+      actions:
+        type: array
+        minItems: 3
+        maxItems: 3
+        items: { $ref: '#/components/schemas/FaceLivenessAction' }
+        examples:
+          - [SMILE, BLINK, TURN_RIGHT]
+      challengeToken: { $ref: '#/components/schemas/FaceChallengeToken' }
+      currentStep:
+        type: integer
+        description: Zero-based index of the action to prove next. Always 0 on a fresh challenge.
+        minimum: 0
+        examples: [0]
+      nextAction:
+        description: The action to prompt right now, equal to `actions[currentStep]`.
+        allOf:
+          - $ref: '#/components/schemas/FaceLivenessAction'
+      totalSteps:
+        type: integer
+        description: How many uploads complete the scan.
+        examples: [3]
+      expiresAt:
+        type: string
+        format: date-time
+        description: |
+          5 minutes after issue, covering several verified round-trips. The
+          challenge is still single-use and is stamped consumed on the final
+          step, so the wider window does not make it replayable.
+
+  FaceEnrollmentStepChallengeResponse:
+    type: object
+    required: [message, data]
+    properties:
+      message:
+        type: string
+        examples: [Step-by-step face registration started. Perform the first action.]
+      data: { $ref: '#/components/schemas/FaceEnrollmentStepChallenge' }
+
+  FaceEnrollmentRequest:
+    type: object
+    description: |
+      A batch capture. The frames prove all three actions in one burst and the
+      server derives the template from them. There is deliberately no descriptor
+      field: the template used to be computed in the browser and posted here,
+      which meant the server never saw a face at the moment identity was
+      established and a template built from a photograph of somebody else was
+      indistinguishable from a real enrollment. Any `faceScan` field sent
+      alongside these is ignored outright.
+    required: [frames, challengeToken, consent]
+    properties:
+      frames:
+        type: array
+        description: |
+          The captured frames, in capture order, sent as repeated `frames`
+          parts. Between 6 and 16 of them, each at most 1.5 MB, as JPEG, PNG,
+          WEBP, HEIC or HEIF. The declared part mimetype is not trusted: every
+          buffer is checked against real image magic bytes before it reaches the
+          face engine. The frames are held in memory for the length of the
+          request and are never written to disk, to Cloudinary, or to the
+          database.
+        minItems: 6
+        maxItems: 16
+        items:
+          type: string
+          format: binary
+      challengeToken: { $ref: '#/components/schemas/FaceChallengeToken' }
+      consent:
+        type: boolean
+        description: |
+          Explicit biometric consent, which must be exactly `true`. Enrollment
+          is refused without it (GDPR Art. 9 and BIPA both require an
+          affirmative, informed act before a biometric identifier is collected),
+          and the accepted consent is stored as a timestamp plus the policy
+          version in force. Sent as the multipart string `true` or `false`.
+        examples: [true]
+
+  FaceStepEnrollmentRequest:
+    type: object
+    description: |
+      One action of a step-by-step capture. Each request carries a dense burst
+      for a single prompted movement, so the server can accept or reject that
+      action on its own instead of failing a three-action capture at the end
+      with nothing to say about which part went wrong.
+    required: [frames, challengeToken]
+    properties:
+      frames:
+        type: array
+        description: |
+          The burst for this one action, in capture order. Between 4 and 20
+          frames, each at most 1.5 MB, same accepted formats and same magic-byte
+          check as a batch capture, and equally never persisted. Fewer frames
+          than a batch because it covers one action, but sampled fast enough to
+          catch a blink lasting a couple of hundred milliseconds.
+        minItems: 4
+        maxItems: 20
+        items:
+          type: string
+          format: binary
+      challengeToken: { $ref: '#/components/schemas/FaceChallengeToken' }
+      consent:
+        type: boolean
+        description: |
+          Required, and required to be `true`, on the first step only, because
+          that is the request in which a biometric is first derived. Later steps
+          may omit it: the consent recorded at step 0 governs the whole scan.
+        examples: [true]
+
+  FaceEnrollmentResponse:
+    type: object
+    description: |
+      A completed enrollment. The body carries the refreshed account rather than
+      anything biometric, so the client can flip its cached session to
+      `hasFaceScan: true` and stop offering enrollment.
+    required: [message, data]
+    properties:
+      message:
+        type: string
+        examples: [Face scan added successfully.]
+      data:
+        type: object
+        required: [user]
+        properties:
+          user: { $ref: '#/components/schemas/AttendantAccount' }
+
+  FaceStepProgress:
+    type: object
+    description: |
+      An accepted step that was not the last one. The server has verified this
+      action and advanced the challenge; the client prompts `nextAction` and
+      uploads again.
+    required: [done, currentStep, nextAction, totalSteps]
+    properties:
+      done:
+        type: boolean
+        const: false
+      currentStep:
+        type: integer
+        description: The index now awaiting proof, one past the step just accepted.
+        minimum: 1
+        examples: [1]
+      nextAction:
+        allOf:
+          - $ref: '#/components/schemas/FaceLivenessAction'
+      totalSteps:
+        type: integer
+        examples: [3]
+
+  FaceStepCompleted:
+    type: object
+    description: |
+      The final step. The template is derived from the descriptors accumulated
+      across the whole scan, checked against every other account's template, and
+      stored encrypted, all before this response is written.
+    required: [done, user]
+    properties:
+      done:
+        type: boolean
+        const: true
+      user: { $ref: '#/components/schemas/AttendantAccount' }
+
+  FaceStepEnrollmentResponse:
+    type: object
+    description: |
+      The reply to one step. Branch on `data.done` rather than on the status
+      code: an intermediate step and the final commit are both 200.
+    required: [message, data]
+    properties:
+      message:
+        type: string
+        examples: [Action verified. Perform the next action.]
+      data:
+        oneOf:
+          - $ref: '#/components/schemas/FaceStepProgress'
+          - $ref: '#/components/schemas/FaceStepCompleted'
+
+  FaceScanStatus:
+    type: object
+    description: |
+      Enrollment state, and the entire biometric surface any endpoint exposes.
+      There is no shape here that could carry the descriptor, by design: the
+      template is decrypted in memory at match time and never serialized.
+    required: [hasFaceScan]
+    properties:
+      hasFaceScan:
+        type: boolean
+        const: true
+        description: |
+          Always `true` when present. An account with nothing enrolled answers
+          404 rather than reporting `false`, so a client that gets a 200 here
+          knows a template exists without inspecting the field.
+
+  FaceScanStatusResponse:
+    type: object
+    required: [message, data]
+    properties:
+      message:
+        type: string
+        examples: [Face scan retrieved successfully.]
+      data: { $ref: '#/components/schemas/FaceScanStatus' }
+
+parameters:
+  FaceScanUserId:
+    name: userId
+    in: path
+    required: true
+    description: |
+      The attendant whose enrollment is being read or reset. Attendants and
+      administrators are separate tables with overlapping ids, so this always
+      names an attendant, never an administrator.
+    schema:
+      type: integer
+      minimum: 1
+      examples: [12]
