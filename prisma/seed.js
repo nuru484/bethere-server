@@ -32,11 +32,11 @@ async function main() {
   // Explicit opt-in: without ADMIN_SEED_ENABLED=true the seed is a no-op, so a
   // deploy pipeline can never silently plant demo data in production.
   if (!ENV.ADMIN_SEED_ENABLED) {
-    logger.info("🌱 Seed skipped (ADMIN_SEED_ENABLED is not true).");
+    logger.info("Seed skipped (ADMIN_SEED_ENABLED is not true).");
     return;
   }
 
-  logger.info("🌱 Starting database seeding...");
+  logger.info("Starting database seeding...");
 
   // Dedicated demo principals for the one-click demo login (never the real
   // admin). The demo admin gets a RANDOM password rotated every run, so it is
@@ -88,7 +88,7 @@ async function main() {
   // ============ RICH DEMO DATA (idempotent, time-anchored) ============
   await seedDemoData();
 
-  logger.info("🎉 Database seeding completed successfully!");
+  logger.info("Database seeding completed successfully!");
 }
 
 /**
@@ -393,7 +393,7 @@ async function seedDemoData() {
 
 main()
   .catch((e) => {
-    logger.error(e, "❌ Error during database seeding");
+    logger.error(e, "Error during database seeding");
     process.exit(1);
   })
   .finally(async () => {

@@ -30,7 +30,7 @@ export const sessionSchedulerQueue = new Queue("sessionScheduler", {
  * skipDuplicates.
  */
 export async function scheduleUpcomingSessions() {
-  logger.info("🔍 Checking for events needing session creation...");
+  logger.info("Checking for events needing session creation...");
 
   // The venue's tomorrow as a UTC day start - the same convention session
   // rows are stored with (see utils/time-context.js).
@@ -97,10 +97,10 @@ export async function scheduleUpcomingSessions() {
 
     scheduledCount++;
     logger.info(
-      `📅 Scheduled session creation for event "${event.title}" (ID: ${event.id})`
+      `Scheduled session creation for event "${event.title}" (ID: ${event.id})`
     );
   }
 
-  logger.info(`✅ Scheduled ${scheduledCount} session(s) for creation`);
+  logger.info(`Scheduled ${scheduledCount} session(s) for creation`);
   return scheduledCount;
 }

@@ -21,7 +21,7 @@ async function ensureRepeatableJob(queue, name, pattern) {
     if (job.name === name && job.pattern !== pattern) {
       await queue.removeRepeatableByKey(job.key);
       logger.info(
-        `🧹 Removed stale repeat schedule for ${name} (${job.pattern} -> ${pattern})`
+        `Removed stale repeat schedule for ${name} (${job.pattern} -> ${pattern})`
       );
     }
   }
@@ -31,7 +31,7 @@ async function ensureRepeatableJob(queue, name, pattern) {
 /** Job-failure reporting shared by every worker: log + Sentry (DSN-gated). */
 function reportJobFailure(queueName) {
   return (job, err) => {
-    logger.error(err, `❌ ${queueName} job ${job?.id} failed`);
+    logger.error(err, `${queueName} job ${job?.id} failed`);
     captureError(err, {
       queue: queueName,
       jobId: job?.id,
@@ -73,7 +73,7 @@ export async function startWorkers() {
 
   const sessionWorker = createSessionWorker();
 
-  logger.info("🚀 Session worker started and listening for jobs...");
+  logger.info("Session worker started and listening for jobs...");
 
   // Run the scheduler and finalizer immediately on startup, so a deploy that
   // was down over a boundary catches up without waiting for the next cron.

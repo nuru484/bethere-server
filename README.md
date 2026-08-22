@@ -10,7 +10,7 @@ This repository is the **API and background job engine**. It handles authenticat
 
 ---
 
-## 🧠 How It Works
+## How It Works
 
 **1. Enrollment (consented, encrypted).**
 A user enrolls their face once. The 128-dimension descriptor is produced in the browser with **face-api.js**, but the server stores it **AES-256-GCM encrypted at rest** (`faceScanEnc`) and decrypts it only in memory at match time; the raw descriptor never leaves the server. Enrollment requires explicit **biometric consent** (GDPR Art. 9 / BIPA), and deletion destroys the template.
@@ -32,7 +32,7 @@ Cookie-only **JWT** access + refresh tokens with **refresh-token rotation and re
 
 ---
 
-## 📚 Table of Contents
+## Table of Contents
 
 * [API Reference](#-api-reference)
 * [Features](#-features)
@@ -49,7 +49,7 @@ Cookie-only **JWT** access + refresh tokens with **refresh-token rotation and re
 
 ---
 
-## 📖 API Reference
+## API Reference
 
 Interactive docs for every endpoint: **[api.bethere.manuru.dev/api/docs](https://api.bethere.manuru.dev/api/docs)**
 
@@ -70,16 +70,16 @@ that no longer exists.
 
 ---
 
-## ✨ Features
+## Features
 
-### 👥 User Capabilities
+### User Capabilities
 
 * Register and authenticate (passwordless OTP login or password + optional 2FA).
 * Enroll a face once (consented; stored encrypted on the server).
 * Check in and out by scanning the venue's rotating code, then a live face-liveness check.
 * View personal attendance history and event details.
 
-### 🧭 Admin Capabilities
+### Admin Capabilities
 
 * Create, update, and delete events (each gets a rotating venue code).
 * Open the **venue-code display** for an event (the screen shown at the location).
@@ -87,7 +87,7 @@ that no longer exists.
 * Manage user records and reset a user's face template when required.
 * Review anomaly flags and check-in evidence; view attendance analytics and reports.
 
-### ⚙️ Automated System Intelligence
+### Automated System Intelligence
 
 * **BullMQ + Redis** power recurring event **session generation**.
 * Rotating **venue codes** are stateless keyed hashes (no per-rotation DB load).
@@ -95,7 +95,7 @@ that no longer exists.
 * A scheduled **retention sweep** purges expired auth material, challenges, evidence, and dormant biometric templates.
 * Robust **error handling**, **role-based access control**, and **input validation** via *express-validator*.
 
-### 🔐 Authentication & Security
+### Authentication & Security
 
 * **Cookie-only JWT** access + refresh tokens with **rotation and replay-as-theft detection**, plus a per-request session-epoch check for instant revocation.
 * Passwordless **OTP login**, optional **2FA**, and a hashed-token **password reset** flow (`nodemailer` + EJS).
@@ -105,7 +105,7 @@ that no longer exists.
 
 ---
 
-## 🛠️ Tech Stack
+## Tech Stack
 
 | Layer                  | Technology / Library                          |
 | ---------------------- | --------------------------------------------- |
@@ -130,7 +130,7 @@ that no longer exists.
 
 ---
 
-## 🏗️ Architecture Overview
+## Architecture Overview
 
 ```
 Frontend (face-api.js)
@@ -157,7 +157,7 @@ Session Scheduler → Session Worker (background)
 
 ---
 
-## 🗄️ Database Design
+## Database Design
 
 **Core Entities**
 
@@ -171,13 +171,13 @@ All schema relations and constraints are defined using **Prisma**.
 
 ---
 
-## ⚙️ Background Jobs
+## Background Jobs
 
-### 🎯 Purpose
+### Purpose
 
 Automates the creation of event sessions using **BullMQ** and **Redis**.
 
-### 🧩 Components
+### Components
 
 * `src/jobs/session-queue.js` → defines the job queue.
 * `src/jobs/session-scheduler.js` → finds upcoming events and schedules session creation jobs.
@@ -188,7 +188,7 @@ Automates the creation of event sessions using **BullMQ** and **Redis**.
 
 ---
 
-## 🚀 Getting Started
+## Getting Started
 
 ### Prerequisites
 
@@ -253,7 +253,7 @@ openssl rand -hex 32   # -> FACE_TEMPLATE_ENC_KEY
 npm run migrate
 ```
 
-> ⚙️ **Seed the Database**
+> **Seed the Database**
 >
 > Creates the first admin and base configuration. The seed is **opt-in**: without
 > `ADMIN_SEED_ENABLED=true` in the environment it logs "Seed skipped" and does
@@ -290,7 +290,7 @@ npm run worker:dev
 
 ---
 
-## 🔐 Environment Variables
+## Environment Variables
 
 Copy [`.env.example`](./.env.example) to `.env` and fill it in; it is the
 authoritative list and tags every variable `(required)` or `(optional)`.
@@ -348,7 +348,7 @@ the Docker entrypoint).
 
 ---
 
-## 📦 Project Structure
+## Project Structure
 
 ```
 bethere-server/
@@ -375,7 +375,7 @@ bethere-server/
 
 ---
 
-## 🌐 Deployment
+## Deployment
 
 Deployed on **Render** with the following configuration:
 
@@ -408,7 +408,7 @@ at boot).
 
 ---
 
-## 🤝 Contributing
+## Contributing
 
 Contributions are welcome! If you'd like to improve this project, feel free to:
 
@@ -427,7 +427,7 @@ Questions or suggestions?
 
 ---
 
-## 🧾 License
+## License
 
 **MIT License**
 

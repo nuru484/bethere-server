@@ -19,7 +19,7 @@ import { sessionQueue } from "./session-queue.js";
 export async function processSessionJob(job) {
   const { eventId } = job.data;
 
-  logger.info(`📅 Processing session creation for event: ${eventId}`);
+  logger.info(`Processing session creation for event: ${eventId}`);
 
   // findUnique on purpose (the soft-delete extension leaves it unscoped), so
   // deletedAt can be INSPECTED rather than silently hiding the row - a chained
@@ -46,7 +46,7 @@ export async function processSessionJob(job) {
   // re-chain - returning here ends the chain for good.
   if (event.deletedAt || event.archived) {
     const reason = event.deletedAt ? "Event deleted" : "Event archived";
-    logger.info(`🛑 ${reason}; skipping session creation for event ${eventId}`);
+    logger.info(`${reason}; skipping session creation for event ${eventId}`);
     return { status: "skipped", reason };
   }
 
@@ -77,7 +77,7 @@ export async function processSessionJob(job) {
 
   if (existingSession) {
     logger.info(
-      `⚠️ Session already exists for event ${eventId} on ${sessionStartDate}`
+      `Session already exists for event ${eventId} on ${sessionStartDate}`
     );
 
     return { status: "skipped", reason: "Session already exists" };
@@ -86,7 +86,7 @@ export async function processSessionJob(job) {
   // Check if we should still create sessions (if event has endDate)
   if (event.endDate && sessionStartDate > new Date(event.endDate)) {
     logger.info(
-      `🛑 Event ${eventId} has ended. No more sessions will be created.`
+      `Event ${eventId} has ended. No more sessions will be created.`
     );
 
     return { status: "completed", reason: "Event ended" };
@@ -110,7 +110,7 @@ export async function processSessionJob(job) {
 
   const lastPlanned = plannedSessions[plannedSessions.length - 1];
   logger.info(
-    `✅ Created ${count} session(s) for event ${eventId}: ` +
+    `Created ${count} session(s) for event ${eventId}: ` +
       `${format(sessionStartDate, "yyyy-MM-dd")} -> ` +
       `${format(lastPlanned.startDate, "yyyy-MM-dd")} ` +
       `(${event.startTime}-${event.endTime})`
@@ -137,7 +137,7 @@ export async function processSessionJob(job) {
           { delay }
         );
         logger.info(
-          `🔄 Scheduled next session for ${format(
+          `Scheduled next session for ${format(
             nextSessionDate,
             "yyyy-MM-dd"
           )}`
@@ -166,7 +166,7 @@ export function createSessionWorker() {
   });
 
   worker.on("failed", (job, err) => {
-    logger.error(err.message, `❌ Session job ${job?.id} failed`);
+    logger.error(err.message, `Session job ${job?.id} failed`);
     // DSN-gated no-op when Sentry is disabled (see lib/sentry.js).
     captureError(err, {
       queue: "sessionQueue",
@@ -178,7 +178,7 @@ export function createSessionWorker() {
   });
 
   worker.on("completed", (job, result) => {
-    logger.info(result, `✅ Session job ${job.id} completed successfully`);
+    logger.info(result, `Session job ${job.id} completed successfully`);
   });
 
   return worker;

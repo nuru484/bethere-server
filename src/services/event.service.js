@@ -148,10 +148,10 @@ export async function createEvent(input, file) {
   try {
     const eventStartDate = utcDayStart(startDate);
     await queueSessionCreation(event.id, eventStartDate, {
-      scheduled: `📅 Scheduled first session for event ${
+      scheduled: `Scheduled first session for event ${
         event.id
       } on ${eventStartDate.toISOString()}`,
-      immediate: `📅 Queued immediate session creation for event ${event.id}`,
+      immediate: `Queued immediate session creation for event ${event.id}`,
     });
   } catch (error) {
     logger.error(error, `Failed to schedule session for event ${event.id}`);
@@ -367,8 +367,8 @@ export async function updateEvent(eventId, input, file) {
         updatedEvent.id,
         utcDayStart(updatedEvent.startDate),
         {
-          scheduled: `📅 Scheduled session rebuild for updated event ${updatedEvent.id}`,
-          immediate: `📅 Queued immediate session rebuild for updated event ${updatedEvent.id}`,
+          scheduled: `Scheduled session rebuild for updated event ${updatedEvent.id}`,
+          immediate: `Queued immediate session rebuild for updated event ${updatedEvent.id}`,
         }
       );
     } catch (error) {
@@ -426,8 +426,8 @@ async function reconcileSessionSchedule(
 
       if (!sessionExists) {
         await queueSessionCreation(updatedEvent.id, eventStartDate, {
-          scheduled: `📅 Rescheduled session for updated event ${updatedEvent.id}`,
-          immediate: `📅 Queued immediate session creation for updated event ${updatedEvent.id}`,
+          scheduled: `Rescheduled session for updated event ${updatedEvent.id}`,
+          immediate: `Queued immediate session creation for updated event ${updatedEvent.id}`,
         });
       } else {
         logger.info(
@@ -466,7 +466,7 @@ async function reconcileSessionSchedule(
             { delay }
           );
           logger.info(
-            `🔄 Scheduled next recurring session for event ${updatedEvent.id}`
+            `Scheduled next recurring session for event ${updatedEvent.id}`
           );
         }
       }
@@ -474,7 +474,7 @@ async function reconcileSessionSchedule(
   } catch (error) {
     logger.error(
       error,
-      `❌ Failed to reschedule session for event ${updatedEvent.id}:`
+      `Failed to reschedule session for event ${updatedEvent.id}:`
     );
   }
 }
