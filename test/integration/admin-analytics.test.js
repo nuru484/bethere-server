@@ -1,6 +1,6 @@
 // test/integration/admin-analytics.test.js
 //
-// The redesigned admin analytics slices: hero KPIs (presence/punctuality/
+// The admin analytics slices: hero KPIs (presence/punctuality/
 // integrity with trends), the live snapshot, the presence time series with a
 // previous-period overlay, and the categorical breakdowns - all against the
 // same deterministic seed, plus the role gate.

@@ -2,11 +2,11 @@
 //
 // ALL recurrence/occurrence date arithmetic for session generation lives
 // here, and nowhere else. The scheduler sweep, the session worker, and the
-// event update path each used to carry their own copy of "when is the next
-// occurrence" - and the copies disagreed (one skipped the multi-day
-// step-back, one used server-local midnight), so a multi-day recurring
-// event could be scheduled for different days depending on which code path
-// fired. Pure on purpose: no Redis, no database, unit-testable date math.
+// event update path all answer "when is the next occurrence" from this one
+// module: separate copies drift apart (over the multi-day step-back, over
+// server-local versus UTC midnight) and a multi-day recurring event then gets
+// scheduled for different days depending on which code path fired. Pure on
+// purpose: no Redis, no database, unit-testable date math.
 import { addUtcDays, utcDayAtTime, utcDayStart } from "../utils/time-context.js";
 
 /** An event's occurrence length in days; missing/zero reads as one day. */
@@ -22,10 +22,10 @@ const occurrenceLengthDays = (durationDays) => Math.max(1, durationDays || 1);
  * durationDays - 1 on every recurrence.
  *
  * The result is always AFTER the last stored day. A recurrenceInterval
- * shorter than durationDays (rejected on write now, but legacy rows exist)
- * otherwise computes a day that already has a row: the worker answered
- * "skipped" before it could chain the next job, the chain died, and the daily
- * sweep re-enqueued the same stalled event forever without ever producing a
+ * shorter than durationDays (rejected on write, but legacy rows carry it)
+ * otherwise computes a day that already has a row: the worker answers
+ * "skipped" before it can chain the next job, the chain dies, and the daily
+ * sweep re-enqueues the same stalled event forever without ever producing a
  * second occurrence.
  */
 export function nextOccurrenceStart(
@@ -44,11 +44,11 @@ export function nextOccurrenceStart(
 /**
  * Plans the Session rows for ONE occurrence of an event: one row PER DAY.
  *
- * A single row spanning several days used to be created for a multi-day event,
- * but Attendance is unique on (userId, sessionId) - so that one row meant one
- * check-in for the ENTIRE span, and a Mon-Fri conference could only ever
- * record a single day per attendee. A day per row makes attendance per day,
- * which is what a "session" means everywhere else in the product.
+ * Attendance is unique on (userId, sessionId), so a single row spanning a
+ * multi-day event would mean one check-in for the ENTIRE span and a Mon-Fri
+ * conference could only ever record a single day per attendee. A day per row
+ * makes attendance per day, which is what a "session" means everywhere else in
+ * the product.
  */
 export function planOccurrenceSessions({
   eventId,
@@ -63,11 +63,11 @@ export function planOccurrenceSessions({
 
   const rows = [];
   for (let offset = 0; offset < occurrenceLengthDays(durationDays); offset++) {
-    // UTC throughout: the day walk and the time-of-day placement both used
-    // the SERVER's local calendar, so a local DST transition inside the
-    // occurrence produced a startDate that was not UTC midnight - and that
-    // column is half of Session's @@unique([eventId, startDate]), so the same
-    // calendar day could be inserted twice.
+    // UTC throughout for both the day walk and the time-of-day placement: on
+    // the SERVER's local calendar, a local DST transition inside the occurrence
+    // yields a startDate that is not UTC midnight - and that column is half of
+    // Session's @@unique([eventId, startDate]), so the same calendar day can be
+    // inserted twice.
     const day = addUtcDays(firstDay, offset);
     // Never run an occurrence past the event's own end date.
     if (lastAllowedDay && day > lastAllowedDay) break;

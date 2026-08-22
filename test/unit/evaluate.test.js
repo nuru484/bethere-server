@@ -86,8 +86,8 @@ describe("evaluateLiveness", () => {
 
   it("rejects the right actions performed in the WRONG order", () => {
     // Every signal the challenge asks for is present somewhere in the burst,
-    // just not in the challenged sequence. The old set-wise check passed this,
-    // which is what let one fixed kit of stills satisfy any challenge draw.
+    // just not in the challenged sequence. A set-wise check passes this, which
+    // is what lets one fixed kit of stills satisfy any challenge draw.
     const frames = [
       frame({ happy: 0.9 }), // smiled first
       frame({ ear: 0.1 }), // then blinked
@@ -119,8 +119,8 @@ describe("evaluateLiveness", () => {
 
   it("is not derailed by an incidental glance in the very first frame", () => {
     // Frame 0 is grabbed the instant Start is tapped, before the user reacts,
-    // so it often carries a real yaw. Latching the turn direction from it used
-    // to invert the expected signs and make a GENUINE left-then-right pair
+    // so it often carries a real yaw. Latching the turn direction from it
+    // inverts the expected signs and makes a GENUINE left-then-right pair
     // impossible to satisfy.
     const frames = [
       frame({ yaw: 22 }), // incidental glance, not the prompted turn
@@ -219,8 +219,8 @@ describe("evaluateLiveness", () => {
     expect(v.reasons).toContain("insufficient_usable_frames");
   });
 
-  // Real-user scenarios that the old fixed thresholds falsely rejected. These
-  // are the cases the recalibration exists to pass.
+  // Real-user scenarios that fixed thresholds falsely reject. These are the
+  // cases the calibrated, relative thresholds exist to pass.
 
   it("passes a genuine smile held through the whole burst", () => {
     // Told to smile, the user smiles from the first frame to the last, so the
@@ -240,9 +240,9 @@ describe("evaluateLiveness", () => {
   });
 
   it("detects a blink for a narrow-eyed user whose open EAR never reaches 0.285", () => {
-    // Open-eye EAR sits at ~0.24 (narrow eyes / tilted webcam). The old reopen
-    // bar of 0.285 was unreachable, so blink failed on every attempt. Relative
-    // detection reads the dip against this user's own 0.24 baseline.
+    // Open-eye EAR sits at ~0.24 (narrow eyes / tilted webcam), so a fixed
+    // reopen bar of 0.285 is unreachable and blink fails on every attempt.
+    // Relative detection reads the dip against this user's own 0.24 baseline.
     const frames = [
       frame({ ear: 0.24, yaw: 15 }), // open + a turn
       frame({ ear: 0.13 }), // blink low point (well under 0.24 baseline)

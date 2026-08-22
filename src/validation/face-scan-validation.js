@@ -5,11 +5,11 @@ import { body } from "express-validator";
  * controller against LIVENESS.MIN_FRAMES/MAX_FRAMES) and only these two
  * scalars travel in the body.
  *
- * There is deliberately no `faceScan` field any more. The 128-float template
- * used to be computed in the browser and posted here, so the server never saw
- * a face at the point identity was established and a template built from a
- * photo of someone else was indistinguishable from a real enrollment. It is
- * now derived server-side from the uploaded frames.
+ * There is deliberately no `faceScan` field: a 128-float template computed in
+ * the browser and posted here would leave the server blind to the face at the
+ * point identity is established, making a template built from a photo of
+ * someone else indistinguishable from a real enrollment. The template is
+ * derived server-side from the uploaded frames instead.
  */
 export const faceScanValidation = [
   body("challengeToken")

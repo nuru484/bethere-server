@@ -14,9 +14,9 @@ import ENV from "../config/env.js";
  *
  * Session rows store date-only values, and "which day is it at the venue" has
  * to be asked the same way everywhere. Deriving it from the SERVER's local
- * midnight meant a host in UTC and a venue in UTC+12 disagreed about the
- * current day for half of it, so check-in was refused all morning and then
- * opened during the previous venue evening.
+ * midnight leaves a host in UTC and a venue in UTC+12 disagreeing about the
+ * current day for half of it, refusing check-in all morning and opening it
+ * during the previous venue evening.
  */
 export function eventCalendarDay(now = new Date()) {
   // en-CA renders as YYYY-MM-DD, which is exactly the date-only key we want.
@@ -45,7 +45,7 @@ export function utcDayStart(value) {
 /**
  * Adds whole days on the UTC calendar. date-fns' addDays walks the SERVER's
  * local calendar (it keeps the local wall time), so stepping a UTC-midnight
- * day across a local DST transition landed on 23:00 or 01:00 UTC instead of
+ * day across a local DST transition lands on 23:00 or 01:00 UTC instead of
  * midnight - and startDate is part of Session's @@unique([eventId, startDate]),
  * so an off-midnight value lets a second row exist for the same calendar day.
  */
@@ -94,9 +94,9 @@ export function currentTimeStringInEventTz(now = new Date()) {
 /**
  * The venue timezone's UTC offset at `date`, in milliseconds. Positive for
  * zones ahead of UTC. Computed from Intl.DateTimeFormat.formatToParts, which
- * is exact to the second - the previous `new Date(toLocaleString(...))` trick
- * depended on V8 parsing a non-standard locale string and truncated to whole
- * seconds.
+ * is exact to the second, unlike a `new Date(toLocaleString(...))` round-trip,
+ * which depends on V8 parsing a non-standard locale string and truncates to
+ * whole seconds.
  */
 function eventTzOffsetMs(date) {
   const parts = new Intl.DateTimeFormat("en-US", {
@@ -158,8 +158,8 @@ export function eventTimeOnDay(day, timeString) {
 /**
  * The venue calendar day of `instant` as a "YYYY-MM-DD" key - the one way
  * dashboards and reports bucket rows into days. Server-local
- * format(date, "yyyy-MM-dd") disagreed with the check-in path's venue-day
- * discipline whenever host and venue timezones differed.
+ * format(date, "yyyy-MM-dd") disagrees with the check-in path's venue-day
+ * discipline whenever host and venue timezones differ.
  */
 export function eventDayKey(instant) {
   return new Intl.DateTimeFormat("en-CA", {

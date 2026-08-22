@@ -3,9 +3,9 @@
 // The evidence half of the retention sweep. The row is the ONLY record of
 // where a frame lives, so deleting it while the remote asset survives orphans
 // a biometric image in Cloudinary forever with its public id gone. The purge
-// therefore drops only the rows whose assets are confirmed deleted - the
-// worker process used to run with an unconfigured Cloudinary SDK, so every
-// destroy threw, was swallowed, and the rows were deleted anyway.
+// therefore drops only the rows whose assets are confirmed deleted: on a
+// worker process with an unconfigured Cloudinary SDK every destroy throws, and
+// a swallowed throw would otherwise delete the rows anyway.
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
 vi.mock("../../src/utils/cloudinary.js", async (importOriginal) => ({

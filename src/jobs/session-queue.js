@@ -8,7 +8,7 @@ export const sessionQueue = new Queue("sessionQueue", {
     attempts: 3,
     backoff: { type: "exponential", delay: 5000 },
     removeOnComplete: 100,
-    // Bounded: `false` kept every failed job in Redis forever. The most
+    // Bounded: `false` would keep every failed job in Redis forever. The most
     // recent failures are plenty for diagnosis; Sentry has the rest.
     removeOnFail: { count: 500 },
   },

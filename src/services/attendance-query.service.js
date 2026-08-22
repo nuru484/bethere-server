@@ -64,9 +64,9 @@ export function parseSearchFilter(search) {
 
 /**
  * Check-in time range filter; the end date is inclusive (end of that day).
- * Day boundaries are VENUE-timezone instants (the previous version computed
- * "end of day" on the server's local clock, so filters were off by the
- * host/venue offset at both edges).
+ * Day boundaries are VENUE-timezone instants: computing "end of day" on the
+ * server's local clock would put the filter off by the host/venue offset at
+ * both edges.
  */
 export function checkInTimeRange(startDate, endDate) {
   if (!startDate && !endDate) return undefined;

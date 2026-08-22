@@ -188,8 +188,8 @@ describe("passwordless OTP login (attendants, phone-first)", () => {
     const probe = (identifier) =>
       request(app).post("/api/v1/auth/otp/request").send({ identifier });
 
-    // Two probes: the second used to hit the 60s resend cooldown for a real
-    // account (429) while an unknown one stayed at 200 - an existence oracle.
+    // Two probes: a second one that hits the 60s resend cooldown for a real
+    // account (429) while an unknown one stays at 200 is an existence oracle.
     const known = [await probe("known@test.local"), await probe("known@test.local")];
     const unknown = [await probe("ghost@test.local"), await probe("ghost@test.local")];
 
@@ -224,7 +224,7 @@ describe("passwordless OTP login (attendants, phone-first)", () => {
   it("answers the format-derived channel even when the reused code went out by SMS", async () => {
     // The leak: a code issued to the phone a moment ago is REUSED when the
     // email is typed next (the 60s cooldown). Reporting where that code
-    // actually went answered "SMS" to a typed email address, proving both
+    // actually went would answer "SMS" to a typed email address, proving both
     // that the account exists and that it has a phone on file. An unknown
     // identifier can only ever echo the format, so the known answer must too.
     await createAttendant({

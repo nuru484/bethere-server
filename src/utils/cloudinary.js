@@ -28,8 +28,8 @@ export function extractPublicIdFromUrl(urlOrPublicId) {
     let publicIdSegments =
       typeIndex === -1 ? segments.slice(-1) : segments.slice(typeIndex + 1);
     // A SIGNED delivery URL carries an s--<signature>-- segment ahead of the
-    // version. Leaving it in produced a public id no asset ever matched, so
-    // destroy answered "not found" and the asset outlived its retention.
+    // version. Leaving it in yields a public id no asset matches, so destroy
+    // answers "not found" and the asset outlives its retention.
     if (/^s--[\w-]+--$/.test(publicIdSegments[0] ?? "")) {
       publicIdSegments = publicIdSegments.slice(1);
     }

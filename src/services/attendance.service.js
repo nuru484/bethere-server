@@ -419,8 +419,8 @@ export async function checkIn(
   const user = await findUserOrThrow(userId);
   const enrolled = resolveEnrolledDescriptor(user);
 
-  // Presence is re-proven HERE, not only at the preflight. Checking it once
-  // when the challenge was minted let a code be photographed, relayed
+  // Presence is re-proven HERE, not only at the preflight. Checking it once,
+  // when the challenge is minted, would let a code be photographed, relayed
   // off-site, and the frames uploaded from anywhere for the life of the
   // challenge. Codes rotate every 30s, so requiring a still-valid one at
   // upload keeps the proof of presence attached to the proof of liveness.

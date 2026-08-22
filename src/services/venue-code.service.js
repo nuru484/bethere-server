@@ -37,10 +37,10 @@ export async function ensureVenueSecret(eventId) {
   if (!event) return null;
   if (event.venueSecret) return event.venueSecret;
 
-  // Guarded claim, then re-read. A plain read-then-write let two concurrent
-  // callers (the venue display and the first scanner) mint DIFFERENT
-  // secrets; the loser's write won and every code the display had already
-  // fetched failed validation for its whole batch window.
+  // Guarded claim, then re-read. A plain read-then-write lets two concurrent
+  // callers (the venue display and the first scanner) mint DIFFERENT secrets;
+  // the loser's write wins and every code the display has already fetched
+  // fails validation for its whole batch window.
   const secret = crypto.randomBytes(32).toString("hex");
   await prisma.event.updateMany({
     where: { id: eventId, venueSecret: null },
@@ -76,9 +76,9 @@ export function upcomingCodes(secret, now = Date.now(), count = VENUE_CODE.BATCH
  *
  * `skewWindows` is widened at the UPLOAD step: the code is scanned at the
  * preflight and re-sent with the frames, so it must stay acceptable for the
- * whole challenge lifetime. With the default tolerance a user who scanned near
- * the end of a window had as little as ~30s to perform three prompted actions
- * and upload, and was then told the code had expired.
+ * whole challenge lifetime. With the default tolerance a user who scans near
+ * the end of a window has as little as ~30s to perform three prompted actions
+ * and upload before the code reads as expired.
  */
 export function isValidVenueCode(
   secret,

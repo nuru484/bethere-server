@@ -157,8 +157,8 @@ export async function processSessionJob(job) {
 /**
  * Instantiates the session worker. A factory rather than a module-level
  * instance: constructing a BullMQ Worker opens a live Redis connection, and
- * doing that at import time meant merely importing this module (a unit test,
- * a script) spun one up. Only lifecycle.js should call this.
+ * doing that at import time would mean merely importing this module (from a
+ * unit test, a script) spins one up. Only lifecycle.js should call this.
  */
 export function createSessionWorker() {
   const worker = new Worker("sessionQueue", processSessionJob, {

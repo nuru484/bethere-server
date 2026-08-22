@@ -48,8 +48,8 @@ describe("access-token type check", () => {
 
     // Exactly what loginWithPassword mints for the 2FA pending step - same
     // secret as access tokens, but purpose-tagged. Even with a tv claim
-    // grafted on (the historical accident that rejected it), the explicit
-    // purpose check must refuse it.
+    // grafted on, so that nothing else about its shape gives it away, the
+    // explicit purpose check must refuse it.
     const pending = jwt.sign(
       { id: user.id, kind: "USER", purpose: "2FA_PENDING", tv: 0, role: "USER" },
       ENV.ACCESS_TOKEN_SECRET,

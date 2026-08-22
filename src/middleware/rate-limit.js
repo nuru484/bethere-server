@@ -137,11 +137,10 @@ export const otpRequestLimiter = rateLimit({
 });
 
 /**
- * Check-in/check-out surfaces. These were previously unlimited, which made the
- * rotating venue code free to brute-force and let each failed attempt upload
- * evidence frames to Cloudinary at our expense. A genuine attendee needs a
- * couple of tries per event, so this is generous for real use and hostile to
- * scripted probing.
+ * Check-in/check-out surfaces. Unlimited, they leave the rotating venue code
+ * free to brute-force and let each failed attempt upload evidence frames to
+ * Cloudinary at our expense. A genuine attendee needs a couple of tries per
+ * event, so this is generous for real use and hostile to scripted probing.
  */
 export const attendanceAttemptLimiter = rateLimit({
   store: createStore("rl:attendance:"),
@@ -181,8 +180,8 @@ export const attendanceAttemptLimiter = rateLimit({
  * Face ENROLLMENT, step 1: minting the liveness challenge. Cheap (a random
  * challenge plus one row), but not free, so it gets its own bucket with its
  * own prefix. It must NOT share the enrollment bucket: one attempt is
- * challenge + submit, so a shared counter charged every attempt two units and
- * halved the real enrollment budget.
+ * challenge + submit, so a shared counter charges every attempt two units and
+ * halves the real enrollment budget.
  */
 export const faceChallengeLimiter = rateLimit({
   store: createStore("rl:enroll-challenge:"),

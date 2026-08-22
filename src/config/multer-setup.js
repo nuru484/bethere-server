@@ -47,8 +47,8 @@ export const frameUpload = multer({
     // batch routes pass .array("frames", MAX_FRAMES) and step routes
     // .array("frames", MAX_STEP_FRAMES), and the per-route maxCount is what
     // enforces the tighter bound. Using MAX_FRAMES alone here silently
-    // rejected legal 17-20 frame step bursts with UPLOAD_ERROR before the
-    // route-level count check ever ran.
+    // rejects legal 17-20 frame step bursts with UPLOAD_ERROR before the
+    // route-level count check ever runs.
     files: Math.max(LIVENESS.MAX_FRAMES, LIVENESS.MAX_STEP_FRAMES),
   },
 });

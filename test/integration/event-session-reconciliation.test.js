@@ -2,8 +2,8 @@
 //
 // Schedule edits on an event with no attendance rebuild its sessions: the
 // old rows are deleted with the update and the worker recreates them from
-// the new shape. Before this, moving an event's date stranded it - check-in
-// stayed open on the old days and closed on the new ones.
+// the new shape. Without the rebuild, moving an event's date strands it -
+// check-in stays open on the old days and closed on the new ones.
 import { describe, expect, it } from "vitest";
 import request from "supertest";
 import app from "../../app.js";

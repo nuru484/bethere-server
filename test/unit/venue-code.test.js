@@ -46,7 +46,7 @@ describe("venue-code service", () => {
   });
 
   it("rejects a crafted multibyte code WITHOUT throwing (no 500)", () => {
-    // 16 JS chars but 32 UTF-8 bytes: the old length-only guard let this reach
+    // 16 JS chars but 32 UTF-8 bytes: a length-only guard lets this reach
     // timingSafeEqual, which RangeErrors on unequal buffer lengths -> a 500.
     const multibyte = "é".repeat(16);
     expect(() => isValidVenueCode(SECRET, multibyte)).not.toThrow();

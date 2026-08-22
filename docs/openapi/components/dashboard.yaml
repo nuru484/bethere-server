@@ -1,10 +1,9 @@
 # Dashboard analytics components.
 #
 # Two generations of dashboard live side by side. The legacy totals and
-# attendance-data payloads are what the first release shipped and are kept
-# because deployed clients still read them. Everything else is the "slice"
-# redesign: one endpoint per widget, so a board fills in progressively and a
-# single failing chart never blanks the page.
+# attendance-data payloads are kept because deployed clients still read them.
+# Everything else follows the slice model: one endpoint per widget, so a board
+# fills in progressively and a single failing chart never blanks the page.
 #
 # Every slice is computed on the VENUE calendar (EVENT_TIMEZONE), never the
 # server's local clock, so a "day" here means the same day the check-in path

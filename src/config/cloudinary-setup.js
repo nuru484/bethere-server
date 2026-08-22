@@ -2,12 +2,12 @@
 //
 // Configures the Cloudinary SDK exactly once, as an import side effect.
 //
-// Configuration used to live in app.js, which only the WEB process imports -
-// so the worker process (worker.js -> lifecycle.js -> retention -> evidence
-// purge -> deleteImage) ran with an unconfigured SDK and every destroy threw
-// "Must supply api_key". Owning it here means any consumer of
+// Owning it here, rather than in app.js, means any consumer of
 // utils/cloudinary.js is configured by virtue of importing it, in either
-// entrypoint.
+// entrypoint. app.js is imported only by the WEB process, so the worker
+// (worker.js -> lifecycle.js -> retention -> evidence purge -> deleteImage)
+// would otherwise run with an unconfigured SDK and every destroy would throw
+// "Must supply api_key".
 import { v2 as cloudinary } from "cloudinary";
 import ENV from "./env.js";
 

@@ -10,8 +10,8 @@ import logger from "./logger.js";
 
 /**
  * Deferred tasks still in flight. Untracked, a deploy landing between the 200
- * and the setImmediate simply dropped the password-reset email the user was
- * just told to expect; the shutdown path drains this set instead.
+ * and the setImmediate simply drops the password-reset email the user was just
+ * told to expect; the shutdown path drains this set instead.
  */
 const inFlight = new Set();
 

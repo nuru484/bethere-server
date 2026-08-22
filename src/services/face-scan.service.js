@@ -124,11 +124,11 @@ export async function prepareEnrollmentChallenge(userId) {
  * over the uploaded frames, proves the challenge actions were performed live,
  * and derives the template itself.
  *
- * The descriptor used to arrive as a JSON array computed in the browser, so
- * the server never saw a face at the moment identity was established and a
- * template built from a photograph of somebody else was indistinguishable from
- * a real enrollment. Everything downstream (matching, evidence, anomalies)
- * trusts this template, so it has to be produced server-side.
+ * A descriptor computed in the browser is never accepted: the server would
+ * not see a face at the moment identity is established, and a template built
+ * from a photograph of somebody else would be indistinguishable from a real
+ * enrollment. Everything downstream (matching, evidence, anomalies) trusts
+ * this template, so it has to be produced server-side.
  */
 export async function enrollFaceScan(
   userId,

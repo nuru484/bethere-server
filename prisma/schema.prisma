@@ -94,9 +94,9 @@ model User {
 
   Attendance Attendance[]
 
-  // Intentional indexes only: id/email/phone were redundant (PK and @unique
-  // already index). deletedAt supports the soft-delete scoping every read
-  // now carries.
+  // Intentional indexes only: id/email/phone are redundant (PK and @unique
+  // already index them). deletedAt supports the soft-delete scoping every
+  // read carries.
   @@index([deletedAt])
 }
 
@@ -241,7 +241,7 @@ model Attendance {
 
   @@unique([userId, sessionId])
   // Every report/list orders or filters by check-in time, and the session
-  // relation is joined constantly - both were unindexed.
+  // relation is joined constantly, so both columns carry an index.
   @@index([checkInTime])
   @@index([sessionId])
 }

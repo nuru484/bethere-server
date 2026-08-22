@@ -1,8 +1,8 @@
 // src/services/analytics/admin-engagement.service.js
 //
 // Engagement analytics: the top-attendees leaderboard and the recurring-event
-// retention curve (a cohort view BeThere needs that a one-shot donation system
-// never did - does the crowd that showed up for occurrence 1 keep coming?).
+// retention curve - a cohort view of whether the crowd that showed up for
+// occurrence 1 keeps coming.
 import { prisma } from "../../config/prisma-client.js";
 import {
   calculatePercentage,

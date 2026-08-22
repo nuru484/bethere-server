@@ -7,12 +7,6 @@
 // admin.service.js wrappers keep their existing public names and add only the
 // rules that genuinely differ between the kinds (biometric destruction on user
 // deletion, passwordless first-password for attendants, the last-admin guard).
-//
-// These primitives previously existed as drifted copies in the two service
-// files - same intent, subtly divergent implementations (the email check ran
-// sequentially in one and in parallel in the other; the current-vs-new
-// password comparison happened before the row load in one and after in the
-// other). Collapsing them removes that drift.
 import bcrypt from "bcrypt";
 import { prisma } from "../config/prisma-client.js";
 import { BCRYPT_SALT_ROUNDS } from "../config/constants.js";

@@ -1,10 +1,9 @@
 // src/services/session-finalizer.service.js
 //
-// Closes the books on finished sessions. Until this ran, ABSENT was an
-// unreachable status: attendance rows were only ever created by check-in
-// (PRESENT/LATE), so every absence metric in the product was permanently
-// zero, and a user who checked in but never checked out kept an open row
-// forever.
+// Closes the books on finished sessions. It is the only writer of ABSENT:
+// check-in creates PRESENT/LATE rows and nothing else, so without this sweep
+// every absence metric reads zero and a user who checked in but never checked
+// out keeps an open row forever.
 //
 // For every session whose daily window (event.endTime in the venue timezone,
 // plus a grace period) has closed and that has not been finalized yet:
@@ -46,22 +45,20 @@ export async function finalizeSession(session, { markAbsences, now = new Date() 
 
     if (markAbsences) {
       // Set-based absence insert: one INSERT ... SELECT that the database
-      // evaluates entirely server-side. The previous version pulled every
-      // active user id into the Node heap (findMany with no filter or take),
-      // diffed it against the session's rows in JS, then createMany'd the
-      // remainder - at tens of thousands of attendants that meant a huge array
-      // in memory and a giant multi-row insert, inside an open write
-      // transaction that would blow the interactive-transaction timeout and
-      // silently stop marking absences.
+      // evaluates entirely server-side. Pulling every active user id into the
+      // Node heap, diffing it against the session's rows in JS and inserting
+      // the remainder would mean a huge array in memory and a giant multi-row
+      // insert at tens of thousands of attendants, inside an open write
+      // transaction that blows the interactive-transaction timeout and
+      // silently stops marking absences.
       //
-      // - deletedAt IS NULL mirrors the Prisma soft-delete scope the old
-      //   findMany relied on (raw SQL bypasses the extension, so it is spelled
-      //   out here).
+      // - deletedAt IS NULL spells out the Prisma soft-delete scope, which raw
+      //   SQL bypasses along with the rest of the extension.
       // - NOT EXISTS skips users who already have any row for this session
       //   (a real check-in, or an absence from a raced sweep).
-      // - ON CONFLICT DO NOTHING is the race guard the old skipDuplicates gave
-      //   us: a check-in landing between the NOT EXISTS and the insert loses on
-      //   the (userId, sessionId) unique index instead of failing the batch.
+      // - ON CONFLICT DO NOTHING is the race guard: a check-in landing between
+      //   the NOT EXISTS and the insert loses on the (userId, sessionId)
+      //   unique index instead of failing the batch.
       // - updatedAt has no DB default (@updatedAt is applied by Prisma at the
       //   app layer, which a raw insert bypasses), so both timestamps are set.
       absentCreated = await tx.$executeRaw`

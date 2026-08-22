@@ -7,8 +7,7 @@ import { paginationMeta } from "../utils/pagination.js";
 
 /**
  * Sends the standard paginated list envelope, switching to the endpoint's
- * empty-state message when there are no rows. Every list controller used to
- * hand-roll this exact if-empty branch.
+ * empty-state message when there are no rows.
  */
 export function sendPage(res, { message, emptyMessage, rows, total, page, limit }) {
   const empty = rows.length === 0;

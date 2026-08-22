@@ -24,8 +24,8 @@ const { drainDispatches } = await import("../../src/utils/dispatch-async.js");
 /**
  * The reset email is dispatched OFF the response path (dispatch-async.js), so
  * it is not guaranteed to have been sent when the request resolves - reading
- * it straight after the response only worked because setImmediate happened to
- * fire before supertest's IO callback. Drain the deferred sends instead.
+ * it straight after the response works only if setImmediate happens to fire
+ * before supertest's IO callback. Drain the deferred sends instead.
  */
 const waitForMail = async () => {
   await drainDispatches();

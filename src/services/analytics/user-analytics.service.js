@@ -1,8 +1,8 @@
 // src/services/analytics/user-analytics.service.js
 //
-// The attendant (USER) analytics: everything scoped to ONE signed-in user.
-// Where the old personal dashboard showed system-wide counts, this answers
-// "what do I do now, how am I doing, and how consistent am I". Every function
+// The attendant (USER) analytics: everything scoped to ONE signed-in user,
+// answering "what do I do now, how am I doing, and how consistent am I" rather
+// than the system-wide counts the legacy dashboard reports. Every function
 // takes the authenticated userId; nothing crosses users.
 import { Prisma } from "@prisma/client";
 import ENV from "../../config/env.js";

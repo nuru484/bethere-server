@@ -35,9 +35,9 @@ export async function getUserDashboardTotals() {
   const currentTimeString = currentTimeStringInEventTz(now);
 
   // Sessions whose date range covers today. Filtering in SQL keeps this
-  // bounded (previously EVERY session row plus its event was loaded into
-  // memory just to count the active ones); only the time-window check runs
-  // in JS because start/end times are "HH:MM" strings on the event.
+  // bounded, rather than loading EVERY session row plus its event into memory
+  // just to count the active ones; only the time-window check runs in JS
+  // because start/end times are "HH:MM" strings on the event.
   const startOfTomorrow = addUtcDays(currentDate, 1);
 
   const [
@@ -160,8 +160,8 @@ export async function getUserAttendanceData(userId, startDate, endDate) {
   // series still walks rows, because its day bucket needs a date-truncated
   // key that Prisma groupBy cannot express without raw SQL. Those rows carry
   // just four small values each, and parseDateRange caps the range, so the
-  // walk stays memory-bounded - the old version pulled full session rows for
-  // every attendance and recounted them in JS five times over.
+  // walk stays memory-bounded: no full session rows per attendance, and no
+  // recounting the same rows in JS five times over.
   const [statusGroups, recurringCount, nonRecurringCount, attendances] =
     await Promise.all([
       prisma.attendance.groupBy({

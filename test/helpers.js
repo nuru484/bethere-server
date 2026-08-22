@@ -104,7 +104,7 @@ export async function createEventWithActiveSession() {
 
   // Session dates are DATE-ONLY values pinned to the venue's calendar day -
   // exactly what the worker writes and what resolveActiveSession looks up.
-  // Building them from the SERVER's local midnight instead made the whole
+  // Building them from the SERVER's local midnight instead would make the
   // suite pass only on a UTC machine.
   const today = eventCalendarDay(new Date());
 

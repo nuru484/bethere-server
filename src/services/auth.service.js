@@ -436,10 +436,10 @@ export async function logout(token) {
     });
     if (decoded?.kind && decoded?.id) {
       // Bump the session epoch AND purge every refresh token for this
-      // principal, not just the presented jti. Deleting one row left the
+      // principal, not just the presented jti. Deleting one row leaves the
       // access token already in the browser valid for the rest of its 30m
-      // life, so a token captured off a shared machine kept working after the
-      // user clicked "log out". revokeAllSessions increments tokenVersion,
+      // life, so a token captured off a shared machine keeps working after the
+      // user clicks "log out". revokeAllSessions increments tokenVersion,
       // which the per-request epoch check rejects immediately, matching how
       // password change/reset/deletion/theft already behave. It also clears
       // the cached epoch (running outside a transaction), so the revocation

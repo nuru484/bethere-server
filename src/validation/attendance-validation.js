@@ -13,8 +13,8 @@ const challengeTokenRule = body("challengeToken")
   .withMessage("Invalid challenge token.");
 
 // Step 1 (both directions): the fail-fast preflight that issues a liveness
-// challenge. Presence is proven by the scanned rotating venue code; the geofence
-// is gone. `mode` selects check-in vs check-out.
+// challenge. Presence is proven by the scanned rotating venue code, not by a
+// geofence. `mode` selects check-in vs check-out.
 export const createChallengeValidation = [
   venueCodeRule,
   body("mode")

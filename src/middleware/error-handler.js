@@ -121,7 +121,7 @@ export const errorHandler = (error, req, res, _next) => {
   }
 
   // Multer limit violations (file too large, too many files) are client
-  // errors; unmapped they surfaced as 500s.
+  // errors; unmapped they surface as 500s.
   if (processedError?.name === "MulterError") {
     const message =
       processedError.code === "LIMIT_FILE_SIZE"
@@ -209,8 +209,8 @@ export const errorHandler = (error, req, res, _next) => {
 
   // The machine-readable code is part of the API contract and MUST survive in
   // production: the client refreshes its session on TOKEN_EXPIRED but logs out
-  // on INVALID_TOKEN. Stripping it here left the browser unable to tell them
-  // apart, so no session was ever refreshed in production. It classifies the
+  // on INVALID_TOKEN. Stripping it here leaves the browser unable to tell the
+  // two apart, so no session is ever refreshed in production. It classifies the
   // failure and carries no sensitive detail (unlike stack/errorId/context).
   if (code) errorResponse.code = code;
 

@@ -3,7 +3,7 @@
 // The biometric-minimization half of the retention sweep, against the real
 // database. The NULL cases matter most: legacy plaintext enrollments predate
 // faceLastUsedAt, and `faceLastUsedAt < cutoff` is UNKNOWN for them in SQL, so
-// they used to survive the purge forever.
+// without the updatedAt fallback they survive the purge forever.
 import { describe, expect, it } from "vitest";
 import { prisma } from "../../src/config/prisma-client.js";
 import { TEMPLATE_DORMANT_DAYS } from "../../src/config/constants.js";

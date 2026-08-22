@@ -1,9 +1,9 @@
 // test/unit/plan-occurrence-sessions.test.js
 //
 // Sessions are stored one row PER DAY. Attendance is unique on
-// (userId, sessionId), so a single row spanning a multi-day event meant one
-// check-in for the whole span - a five-day conference recorded one day per
-// attendee and refused the rest with "already checked in".
+// (userId, sessionId), so a single row spanning a multi-day event would mean
+// one check-in for the whole span - a five-day conference recording one day
+// per attendee and refusing the rest with "already checked in".
 import { describe, expect, it } from "vitest";
 import { planOccurrenceSessions } from "../../src/services/session-planning.js";
 
@@ -74,8 +74,8 @@ describe("planOccurrenceSessions", () => {
   it("keeps every day at UTC midnight across a local DST transition", () => {
     // date-fns addDays and Date#setHours both walk the SERVER's LOCAL
     // calendar, so on a host in a DST-observing zone an occurrence spanning
-    // the transition produced a startDate of 23:00 or 01:00 UTC - a second
-    // row for a calendar day that already had one.
+    // the transition yields a startDate of 23:00 or 01:00 UTC - a second row
+    // for a calendar day that already has one.
     const originalTz = process.env.TZ;
     process.env.TZ = "America/New_York"; // DST starts 2026-03-08
     try {

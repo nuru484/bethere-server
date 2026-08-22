@@ -1,6 +1,6 @@
 // src/routes/dashboard/admin-analytics.js
 //
-// The redesigned admin analytics slices. Each card/chart on the admin
+// The admin analytics slices. Each card/chart on the admin
 // dashboard is its own endpoint (the "slice" pattern), so the page fills in
 // progressively and one failing widget never blanks the board. Mounted under
 // /dashboard/admin alongside the legacy totals/attendance-data routes.

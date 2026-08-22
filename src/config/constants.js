@@ -41,9 +41,9 @@ export const LIVENESS = {
   ACTIONS_PER_CHALLENGE: 3,
   // Challenge lifetime. This is the dominant term in the venue-code upload
   // acceptance window (UPLOAD_SKEW_WINDOWS in attendance.service.js is derived
-  // from it), so 120s meant a scanned code stayed valid for ~5 minutes at
-  // upload - long enough to photograph the QR, relay it off-site, and check in
-  // from anywhere. 60s keeps the honest flow comfortable (three prompted
+  // from it): at 120s a scanned code stays valid for ~5 minutes at upload -
+  // long enough to photograph the QR, relay it off-site, and check in from
+  // anywhere. 60s keeps the honest flow comfortable (three prompted
   // actions + a multi-frame burst on a slow phone) while collapsing that
   // window to ~3 minutes. Do not raise it without re-checking the derived
   // upload skew.
@@ -74,9 +74,10 @@ export const LIVENESS = {
   // Head-yaw magnitude (from estimateYaw, ~degrees) that counts as a deliberate
   // turn. The proxy under-reads moderate turns (both cheek landmarks foreshorten
   // as the head rotates), and a user turning to a laptop webcam held at arm's
-  // length rarely produces a large asymmetry, so 18 rejected honest turns. 12
-  // (asymmetry ~0.13) still needs a clear, deliberate turn - a forward face sits
-  // near 0 - while accepting the moderate turns real users actually make.
+  // length rarely produces a large asymmetry, so a bar of 18 rejects honest
+  // turns. 12 (asymmetry ~0.13) still needs a clear, deliberate turn - a
+  // forward face sits near 0 - while accepting the moderate turns real users
+  // actually make.
   YAW_TURN_DEGREES: 9,
   // In the step-by-step flow a turn is captured in isolation (forward -> turned),
   // so the yaw only has to SPAN this much to prove movement - a smaller bar than
@@ -123,11 +124,12 @@ export const LIVENESS = {
   //
   // The SMILE range gate is OFF (0): a user told to smile smiles through the
   // whole short burst, so happy never spans a range - it is indistinguishable
-  // from a photo by range alone, and rejected honest smiles. Anti-photo strength
-  // does not rest on it: every possible challenge draw (3 of TURN_LEFT/
-  // TURN_RIGHT/BLINK/SMILE) still contains a BLINK or a two-turn reversal, each a
-  // transition no still can fake, and the SMILE itself is still proven per-frame
-  // (happy >= SMILE_PROBABILITY) in challenge order.
+  // from a photo by range alone, and a range gate there rejects honest
+  // smiles. Anti-photo strength does not rest on it: every possible challenge
+  // draw (3 of TURN_LEFT/TURN_RIGHT/BLINK/SMILE) still contains a BLINK or a
+  // two-turn reversal, each a transition no still can fake, and the SMILE
+  // itself is still proven per-frame (happy >= SMILE_PROBABILITY) in
+  // challenge order.
   SMILE_MIN_RANGE: 0,
   EAR_MIN_RANGE: 0.04,
   // At least this fraction of frames must be mutually distinct (not near-

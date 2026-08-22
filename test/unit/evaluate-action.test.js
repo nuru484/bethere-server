@@ -145,8 +145,8 @@ describe("evaluateAction (check-in, identity vs enrolled)", () => {
   });
 
   it("accepts a blink whose closed frame is the LAST frame (no captured reopen)", () => {
-    // The dip alone proves the blink; requiring a reopen frame strictly after it
-    // used to drop a blink performed at the end of the capture window.
+    // The dip alone proves the blink; requiring a reopen frame strictly after
+    // it would drop a blink performed at the end of the capture window.
     const frames = [
       frame({ ear: 0.3 }),
       frame({ ear: 0.3 }),

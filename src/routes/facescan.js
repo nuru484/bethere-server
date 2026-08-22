@@ -32,7 +32,7 @@ router.post(
 );
 
 // Step 2: the captured frames. The server derives the template from these;
-// it no longer accepts a descriptor computed in the browser.
+// a descriptor computed in the browser is never accepted.
 router.post(
   "/",
   authenticateJWT,

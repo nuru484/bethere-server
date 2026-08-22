@@ -126,7 +126,7 @@ export const requestPasswordReset = async (email) => {
     },
   });
 
-  // Fire-and-forget: awaiting SMTP here made a known email measurably slower
+  // Fire-and-forget: awaiting SMTP here makes a known email measurably slower
   // than an unknown one (which returns above), re-opening enumeration by
   // timing. The DB writes are done; only the send is deferred.
   dispatchAsync(() => sendResetEmail(principal, rawToken), "password reset email");

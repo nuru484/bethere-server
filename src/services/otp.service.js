@@ -105,8 +105,8 @@ export async function issueOtp({
     return { channel, reused: false };
   }
 
-  // Guarded on both channels. An unhandled provider outage here turned OTP
-  // and 2FA login into 500s (and high-severity Sentry noise) instead of a
+  // Guarded on both channels. An unhandled provider outage here turns OTP and
+  // 2FA login into 500s (and high-severity Sentry noise) instead of a
   // retryable message.
   try {
     await send();

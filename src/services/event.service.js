@@ -331,9 +331,9 @@ export async function updateEvent(eventId, input, file) {
   // scratch: existing rows are deleted IN THE SAME TRANSACTION as the event
   // update, and the worker recreates them from the new shape (its
   // sessions.length === 0 path starts from the new startDate). Leaving the
-  // old rows in place stranded the event - check-in stayed open on days the
-  // event no longer covered and closed on days it did, and the denormalized
-  // session times went stale.
+  // old rows in place strands the event - check-in stays open on days the
+  // event no longer covers and closed on days it does, and the denormalized
+  // session times go stale.
   const rebuildSessions = scheduleChanged && hasAttendance === 0;
 
   const updatedEvent = await prisma.$transaction(async (tx) => {
@@ -409,7 +409,7 @@ async function reconcileSessionSchedule(
     if (hasNoSessions || startDateChanged || recurringStatusChanged) {
       // utcDayStart, not the server's local midnight: session rows are keyed
       // on a UTC-midnight startDate, so a non-UTC server's local midnight
-      // never matched a worker-created row and this check enqueued a
+      // never matches a worker-created row and this check would enqueue a
       // redundant job on every single event update.
       const eventStartDate = utcDayStart(updatedEvent.startDate);
 
@@ -439,9 +439,8 @@ async function reconcileSessionSchedule(
     }
 
     // If converted to recurring, schedule the next occurrence. The shared
-    // planner owns the arithmetic (multi-day step-back, UTC day handling) -
-    // this used to hand-roll a server-local variant that disagreed with the
-    // worker's for multi-day events.
+    // planner owns the arithmetic (multi-day step-back, UTC day handling), so
+    // this path cannot disagree with the worker's for multi-day events.
     if (
       recurringStatusChanged &&
       updatedEvent.isRecurring &&

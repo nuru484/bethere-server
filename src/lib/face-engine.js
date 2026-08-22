@@ -7,7 +7,7 @@
 // Node/platform (tfjs-node's prebuilt binaries lag new Node versions).
 //
 // Model weights are NOT in node_modules; they live under FACE_MODELS_PATH (the
-// repo's ./models, copied from the client). Models + backend load once,
+// repo's ./models). Models + backend load once,
 // lazily, so a process that never verifies a check-in never pays the cost.
 import path from "node:path";
 import { createRequire } from "node:module";
@@ -74,7 +74,7 @@ export function loadFaceModels() {
 }
 
 // scoreThreshold is deliberately low: during a TURN step the face is angled and
-// the tiny detector's confidence drops, so a 0.5 bar silently dropped exactly
+// the tiny detector's confidence drops, so a 0.5 bar silently drops exactly
 // the turned frames the step needs (surfacing as insufficient_usable_frames).
 // 0.3 keeps those usable while still rejecting non-faces.
 const detectorOptions = () =>

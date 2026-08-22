@@ -3,8 +3,8 @@
 // The events read surfaces: attendant viewers get currentSession +
 // viewerAttendance attached (batched server-side, so the client's event grid
 // needs zero per-card attendance requests), admins get the bare event, and
-// archived events are hidden from attendants. Plus the previously untested
-// list/read/delete basics.
+// archived events are hidden from attendants. Plus the list/read/delete
+// basics.
 import { describe, expect, it } from "vitest";
 import request from "supertest";
 import app from "../../app.js";

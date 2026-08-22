@@ -50,11 +50,11 @@ export async function getAllUsersAttendanceData(startDate, endDate) {
   };
 
   // Every number aggregates in SQL. The per-day series is a raw GROUP BY on
-  // the venue-timezone day: the previous version materialized EVERY
-  // attendance row in range into memory (the range caps days, not rows - at
-  // thousands of users this was millions of rows on the hot admin landing
-  // page) and bucketed by the SERVER's local day, disagreeing with the
-  // check-in path's venue-day discipline.
+  // the venue-timezone day: materializing EVERY attendance row in range into
+  // memory would be millions of rows on the hot admin landing page at
+  // thousands of users (the range caps days, not rows), and bucketing by the
+  // SERVER's local day would disagree with the check-in path's venue-day
+  // discipline.
   const effectiveInstant = Prisma.sql`COALESCE("checkInTime", "createdAt")`;
   const venueDay = Prisma.sql`to_char((${effectiveInstant} AT TIME ZONE 'UTC') AT TIME ZONE ${ENV.EVENT_TIMEZONE}, 'YYYY-MM-DD')`;
 

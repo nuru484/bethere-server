@@ -2,10 +2,10 @@
 //
 // What the session job refuses to do. A delayed chain job lives in Redis for
 // as long as the recurrence interval, so it outlives the change that stopped
-// the event: the worker reads the event with findUnique (which the soft-delete
-// extension deliberately leaves unscoped) and so used to happily create
-// sessions for a deleted event and re-chain itself forever. Archived events
-// were checked nowhere in src/jobs at all.
+// the event. The worker reads the event with findUnique, which the soft-delete
+// extension deliberately leaves unscoped, so it must inspect deletedAt and the
+// archived flag itself or it will happily create sessions for a stopped event
+// and re-chain itself forever.
 import { describe, expect, it, vi } from "vitest";
 
 const { prisma } = await import("../../src/config/prisma-client.js");

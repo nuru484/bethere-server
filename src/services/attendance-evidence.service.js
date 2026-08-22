@@ -20,8 +20,8 @@ import {
 const EVIDENCE_FOLDER = "bethere/evidence";
 
 /**
- * Rows written before evidence moved to authenticated delivery stored the
- * public delivery URL itself; new rows store the Cloudinary public id. The
+ * Legacy rows store the public delivery URL itself; rows written since
+ * evidence became authenticated-delivery store the Cloudinary public id. The
  * scheme prefix is the discriminator - a public id never starts with one.
  */
 export const isLegacyFrameValue = (value) => /^https?:\/\//i.test(value ?? "");

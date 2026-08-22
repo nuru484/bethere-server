@@ -1,6 +1,6 @@
 // src/routes/dashboard/user-analytics.js
 //
-// The redesigned attendant analytics slices. Each widget on the personal
+// The attendant analytics slices. Each widget on the personal
 // dashboard is its own endpoint, all scoped to the signed-in user. Mounted
 // under /dashboard/users alongside the legacy totals/attendance-data routes.
 import { Router } from "express";

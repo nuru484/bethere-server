@@ -10,7 +10,7 @@
 // data (sessions cascade to attendance; anomalies/evidence by demo event id),
 // and regenerates everything relative to TODAY. Run it again next month and the
 // whole window slides forward, so the site always shows current, active data.
-// Your own (non-demo) records are never touched.
+// Non-demo records are never touched.
 import crypto from "node:crypto";
 import * as bcrypt from "bcrypt";
 import { prisma } from "../src/config/prisma-client.js";
@@ -221,8 +221,8 @@ async function seedDemoData() {
     eventByTitle.set(cfg.title, { event, cfg });
   }
 
-  // Retire demo events an earlier version of this seed created but no longer
-  // manages, so a re-run never leaves stale data.
+  // Retire demo events this seed no longer manages, so a re-run never
+  // leaves stale data behind.
   const retired = await prisma.event.findMany({
     where: { title: { in: ["All-Day Conference"] } },
     select: { id: true },

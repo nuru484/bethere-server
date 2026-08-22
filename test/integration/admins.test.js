@@ -1,8 +1,8 @@
 // test/integration/admins.test.js
 //
-// Admin management: creation (which was broken - the endpoint used the
-// attendant validator that forbids a password) and self-service password
-// change (which could 500 when the current password was omitted).
+// Admin management: creation (the endpoint takes a password, so it must not
+// run the attendant validator that forbids one) and self-service password
+// change (a missing current password is a 400, never a 500).
 import { describe, expect, it } from "vitest";
 import request from "supertest";
 import app from "../../app.js";

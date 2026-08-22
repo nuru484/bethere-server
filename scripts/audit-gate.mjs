@@ -9,12 +9,11 @@ import { execFile } from "node:child_process";
 
 // GHSA id -> why it is acceptable to ship with.
 //
-// Currently empty, and that is the goal state. The brace-expansion DoS
-// advisories that used to sit here are fixed as of the maintenance releases
-// 1.1.18 and 2.1.4, which are pinned per major line in the package.json
-// overrides; the earlier blocker was that the only fix at the time was 5.0.8,
-// whose changed CommonJS export shape broke the old minimatch versions in the
-// ejs and exceljs chains. A same-major patch has no such problem.
+// Empty, and that is the goal state. The brace-expansion DoS advisories are
+// covered by the maintenance releases 1.1.18 and 2.1.4, pinned per major line
+// in the package.json overrides. Prefer a same-major patch over an entry here:
+// the cross-major 5.0.8 changes the CommonJS export shape and breaks the older
+// minimatch versions in the ejs and exceljs chains.
 const ALLOWLIST = {};
 
 const FAIL_SEVERITIES = new Set(["high", "critical"]);

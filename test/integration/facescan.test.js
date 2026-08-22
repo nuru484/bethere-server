@@ -1,6 +1,6 @@
 // test/integration/facescan.test.js
 //
-// Face enrollment over HTTP. Enrollment is now SERVER-SIDE: the client uploads
+// Face enrollment over HTTP. Enrollment is SERVER-SIDE: the client uploads
 // frames and the server derives the template, so there is no way to post a
 // descriptor computed in the browser (or built from a photo of someone else).
 import { afterEach, describe, expect, it } from "vitest";

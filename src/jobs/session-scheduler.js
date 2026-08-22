@@ -23,11 +23,11 @@ export const sessionSchedulerQueue = new Queue("sessionScheduler", {
 /**
  * Daily sweep AND catch-up: enqueues session creation for every event whose
  * next occurrence is due (target day <= tomorrow). The worker self-schedules
- * the next occurrence, but that chain lives only in Redis - a flush or a
- * worker outage during the window used to strand the event forever, because
- * this sweep only matched targets EXACTLY equal to tomorrow. Enqueueing
- * anything already due is safe: the worker checks for existing rows and
- * creates with skipDuplicates.
+ * the next occurrence, but that chain lives only in Redis, so a flush or a
+ * worker outage during the window would strand the event forever if this sweep
+ * matched only targets EXACTLY equal to tomorrow. Enqueueing anything already
+ * due is safe: the worker checks for existing rows and creates with
+ * skipDuplicates.
  */
 export async function scheduleUpcomingSessions() {
   logger.info("🔍 Checking for events needing session creation...");
@@ -38,18 +38,18 @@ export async function scheduleUpcomingSessions() {
   const today = eventCalendarDay();
 
   // Only events that can still need sessions: ones with no session rows at
-  // all (first occurrence never materialized) and recurring ones. The old
-  // unfiltered findMany dragged every finished one-off event through the
+  // all (first occurrence never materialized) and recurring ones. An
+  // unfiltered findMany would drag every finished one-off event through the
   // sweep on every run. Archived events are excluded here and skipped again
-  // in the worker: archiving an event must stop it generating sessions, and
-  // nothing in src/jobs used to look at the flag at all. (Soft-deleted ones
-  // are already scoped out by the Prisma extension on findMany.)
+  // in the worker: archiving an event must stop it generating sessions.
+  // (Soft-deleted ones are already scoped out by the Prisma extension on
+  // findMany.)
   const events = await prisma.event.findMany({
     where: {
       archived: false,
       OR: [{ sessions: { none: {} } }, { isRecurring: true }],
       // Long-finished events can never need sessions again; without this the
-      // sweep dragged every ended recurring event through dueSessionCreation
+      // sweep drags every ended recurring event through dueSessionCreation
       // on every run, forever. gte today, not tomorrow: an event ending
       // today may still need today's catch-up session.
       AND: [{ OR: [{ endDate: null }, { endDate: { gte: today } }] }],

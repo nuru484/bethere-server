@@ -41,8 +41,8 @@ export const validateRequest = (req, res, next) => {
 };
 
 /**
- * Middleware factory: validators + the shared result check. One name only -
- * create/update/delete/custom were four identical copies of this function.
+ * Middleware factory: validators + the shared result check. One name only,
+ * so every route wires validation the same way.
  */
 export const validationMiddleware = {
   create: (validators) => [...validators, validateRequest],

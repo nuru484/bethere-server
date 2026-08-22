@@ -44,7 +44,7 @@ router.post(
   ...createAttendance
 );
 
-// Check-out now also uploads frames for server-side liveness (multipart).
+// Check-out also uploads frames for server-side liveness (multipart).
 router.put(
   "/:eventId",
   authenticateJWT,

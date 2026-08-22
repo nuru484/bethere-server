@@ -468,9 +468,9 @@ function medoidIndex(frames) {
  * a live, self-consistent person performing the challenge, and then DERIVES the
  * template from the frames.
  *
- * This is what moves the trust boundary: the descriptor used to be computed in
- * the browser and posted as JSON, so the server never saw a face at the moment
- * identity was established and anyone could enroll a template built from a
+ * This is where the trust boundary sits: a descriptor computed in the browser
+ * and posted as JSON would mean the server never sees a face at the moment
+ * identity is established, and anyone could enroll a template built from a
  * photograph of someone else.
  *
  * @returns { passed, reasons, failedActions, descriptor }
@@ -559,9 +559,9 @@ export function evaluateLiveness(frames, enrolled, actions, matchThreshold) {
   // Frames arrive in capture order and the client prompts the actions one at a
   // time, so action N must be proven in a frame strictly after action N-1 was
   // proven. Checking the burst as an unordered set (any frame with a closed
-  // eye, any frame smiling, ...) meant a fixed handful of stills satisfied
-  // EVERY possible challenge draw, which made the randomized challenge
-  // decorative. Requiring the sequence is what gives the randomization teeth.
+  // eye, any frame smiling, ...) would let a fixed handful of stills satisfy
+  // EVERY possible challenge draw, making the randomized challenge decorative.
+  // Requiring the sequence is what gives the randomization teeth.
   failedActions.push(...proveActionsInOrder(frames, actions));
 
   if (failedActions.length > 0) reasons.push("action_not_satisfied");

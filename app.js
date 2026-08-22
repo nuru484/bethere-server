@@ -26,10 +26,10 @@ initSentry();
 
 const app = express();
 
-// FRONTEND_URL is always allowed - it IS the app's own frontend, and building
-// the allowlist only from the optional CORS_ACCESS meant a deployment that
-// filled in the required vars and left the optional one blank rejected every
-// browser request from its own client. CORS_ACCESS adds extra origins.
+// FRONTEND_URL is always allowed - it IS the app's own frontend. Building the
+// allowlist only from the optional CORS_ACCESS would make a deployment that
+// fills in the required vars and leaves that one blank reject every browser
+// request from its own client. CORS_ACCESS adds extra origins.
 // Trimmed: a comma-separated list is usually written with spaces, and an
 // untrimmed " https://b.com" would never match the Origin header; trailing
 // slashes are stripped because an Origin header never carries one.

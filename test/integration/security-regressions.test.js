@@ -1,8 +1,8 @@
 // test/integration/security-regressions.test.js
 //
-// Locks two fixes: a soft-deleted admin must not be able to log back in, and
-// the change-password endpoint must let passwordless accounts set a first
-// password while still requiring the current one when a password exists.
+// Locks two invariants: a soft-deleted admin must not be able to log back
+// in, and the change-password endpoint must let passwordless accounts set a
+// first password while still requiring the current one when a password exists.
 import { describe, expect, it } from "vitest";
 import request from "supertest";
 import app from "../../app.js";

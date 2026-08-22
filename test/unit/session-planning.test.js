@@ -1,11 +1,11 @@
 // test/unit/session-planning.test.js
 //
 // The shared occurrence arithmetic. Three call sites (worker, daily sweep,
-// event update) used to hand-roll this math and disagreed: the sweep added
-// the interval to the LAST stored day of a multi-day occurrence without
-// stepping back to its first day, and required an EXACT date match to
-// enqueue - so a multi-day recurring event whose worker chain was lost never
-// got another session. These tests pin the one correct convention.
+// event update) hand-rolling this math disagree: adding the interval to the
+// LAST stored day of a multi-day occurrence without stepping back to its
+// first day, and requiring an EXACT date match to enqueue, leaves a multi-day
+// recurring event whose worker chain was lost without another session. These
+// tests pin the one correct convention.
 import { describe, expect, it } from "vitest";
 import {
   dueSessionCreation,
@@ -47,10 +47,10 @@ describe("nextOccurrenceStart", () => {
   });
 
   it("never lands on a day the occurrence already covers", () => {
-    // A legacy interval SHORTER than the occurrence (2 < 3) computed Jul 22 -
-    // a day that already has a row. The worker answered "skipped" before it
-    // could chain the next job, so the chain died and the daily sweep
-    // re-enqueued the same stalled event forever without ever producing a
+    // A legacy interval SHORTER than the occurrence (2 < 3) lands on Jul 22 -
+    // a day that already has a row. The worker then answers "skipped" before
+    // it can chain the next job, so the chain dies and the daily sweep
+    // re-enqueues the same stalled event forever without ever producing a
     // second occurrence. The next start is always after the last stored day.
     const next = nextOccurrenceStart(day("2026-07-22"), {
       durationDays: 3,
@@ -121,8 +121,8 @@ describe("dueSessionCreation", () => {
   });
 
   it("catches up a first occurrence that slipped into the past", () => {
-    // The old sweep required target === tomorrow exactly, so a start date
-    // already behind it could never fire again.
+    // A sweep requiring target === tomorrow exactly can never fire again for a
+    // start date already behind it.
     const due = dueSessionCreation(
       recurringEvent({
         lastSessionStartDate: null,
@@ -135,10 +135,10 @@ describe("dueSessionCreation", () => {
   });
 
   it("agrees with the worker for a multi-day recurring event", () => {
-    // The divergence that motivated the shared module: last stored day
-    // Jul 22 ends the 3-day occurrence that started Jul 20. The worker
-    // targeted Jul 27; the old sweep computed 22 + 7 = Jul 29, which never
-    // equalled tomorrow (the 27th), so the sweep never backed the worker up.
+    // The divergence the shared module removes: last stored day Jul 22 ends
+    // the 3-day occurrence that started Jul 20. The worker targets Jul 27; a
+    // sweep computing 22 + 7 = Jul 29 never equals tomorrow (the 27th), so it
+    // would never back the worker up.
     const due = dueSessionCreation(recurringEvent(), tomorrow);
 
     expect(due).toEqual({ targetDate: day("2026-07-27"), pastDue: false });
@@ -171,11 +171,11 @@ describe("dueSessionCreation", () => {
   });
 
   it("makes progress on a legacy interval < duration event instead of spinning", () => {
-    // The stall: the target used to compute to a day that ALREADY had a row,
-    // so the worker skipped, the chain died, and every sweep re-enqueued the
-    // same date forever with a spurious catch-up warning. The target is now
-    // the day after the last stored one, and feeding the result back in
-    // advances again - the event moves rather than spinning on one date.
+    // The stall: a target computed onto a day that ALREADY has a row makes
+    // the worker skip, the chain die, and every sweep re-enqueue the same date
+    // forever with a spurious catch-up warning. The target is the day after
+    // the last stored one, and feeding the result back in advances again - the
+    // event moves rather than spinning on one date.
     const legacy = { durationDays: 3, recurrenceInterval: 2 };
 
     const first = dueSessionCreation(
