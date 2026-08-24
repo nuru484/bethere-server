@@ -7,15 +7,13 @@
 // principal tables have overlapping ids.
 import crypto from "crypto";
 import bcrypt from "bcrypt";
-import path from "path";
-import { fileURLToPath } from "url";
 import { prisma } from "../config/prisma-client.js";
 import { BCRYPT_SALT_ROUNDS } from "../config/constants.js";
 import {
   ValidationError,
   BadRequestError,
 } from "../middleware/error-handler.js";
-import sendPasswordResetEmail from "../utils/send-mail.js";
+import { enqueueEmail } from "../jobs/mail-queue.js";
 import {
   findPrincipal,
   findPrincipalByEmail,
@@ -23,9 +21,7 @@ import {
 } from "./auth.service.js";
 import ENV from "../config/env.js";
 import { dispatchAsync } from "../utils/dispatch-async.js";
-import logger from "../utils/logger.js";
 
-const __dirname = path.dirname(fileURLToPath(import.meta.url));
 
 /** Reset links are valid for 15 minutes. */
 const RESET_TOKEN_TTL_MS = 15 * 60 * 1000;
@@ -66,31 +62,29 @@ const getUsableResetRequest = async (rawToken) => {
   return { resetRequest, principal };
 };
 
-/** Sends the reset email; failures are logged but never surfaced. */
+/**
+ * Queues the reset email.
+ *
+ * Not awaited into the response and not surfaced: the endpoint answers the
+ * same way whether or not the address belongs to an account, and a delivery
+ * error reaching the caller would be that oracle by another route. But
+ * swallowing a failure outright used to lose the only way back into an
+ * account, so the send goes on the mail queue and retries there instead.
+ */
 const sendResetEmail = async (principal, rawToken) => {
   const resetLink = `${ENV.FRONTEND_URL}/reset-password?token=${rawToken}`;
 
-  try {
-    await sendPasswordResetEmail({
-      email: principal.email,
-      subject: "Password Reset - BeThere",
-      template: "reset-password.ejs",
-      data: {
-        userFirstName: principal.firstName,
-        userLastName: principal.lastName,
-        resetLink,
-      },
-      attachments: [
-        {
-          filename: "logo.png",
-          path: path.join(__dirname, "../../public/assets/logo.png"),
-          cid: "logo", // matches cid:logo in the email template
-        },
-      ],
-    });
-  } catch (emailError) {
-    logger.error(emailError, "Failed to send password reset email");
-  }
+  await enqueueEmail({
+    email: principal.email,
+    subject: "Password Reset - BeThere",
+    template: "reset-password.ejs",
+    data: {
+      userFirstName: principal.firstName,
+      userLastName: principal.lastName,
+      resetLink,
+      logoUrl: ENV.EMAIL_LOGO_URL,
+    },
+  });
 };
 
 /**
@@ -126,9 +120,10 @@ export const requestPasswordReset = async (email) => {
     },
   });
 
-  // Fire-and-forget: awaiting SMTP here makes a known email measurably slower
+  // Deferred: awaiting the enqueue here makes a known email measurably slower
   // than an unknown one (which returns above), re-opening enumeration by
-  // timing. The DB writes are done; only the send is deferred.
+  // timing. The DB writes are done; only the hand-off is deferred, and the
+  // queue owns delivery from there.
   dispatchAsync(() => sendResetEmail(principal, rawToken), "password reset email");
 };
 

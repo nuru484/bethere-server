@@ -8,6 +8,7 @@ import crypto from "node:crypto";
 import { prisma } from "../config/prisma-client.js";
 import { BadRequestError, TooManyRequestsError } from "../middleware/error-handler.js";
 import sendMail from "../utils/send-mail.js";
+import { enqueueEmail } from "../jobs/mail-queue.js";
 import { sendSms } from "../utils/send-sms.js";
 import { dispatchAsync } from "../utils/dispatch-async.js";
 import logger from "../utils/logger.js";
@@ -85,23 +86,33 @@ export async function issueOtp({
   });
 
   const label = purpose === "LOGIN" ? "login" : "verification";
+  const emailOptions = () => ({
+    email: principal.email,
+    subject: `Your BeThere ${label} code`,
+    text: `Your BeThere ${label} code is ${code}. It expires in 5 minutes.`,
+  });
   const send = () =>
     channel === "SMS"
       ? sendSms(
           principal.phone,
           `Your BeThere ${label} code is ${code}. It expires in 5 minutes.`
         )
-      : sendMail({
-          email: principal.email,
-          subject: `Your BeThere ${label} code`,
-          text: `Your BeThere ${label} code is ${code}. It expires in 5 minutes.`,
-        });
+      : sendMail(emailOptions());
 
   if (deferDelivery) {
-    // DB writes above stay synchronous; only the provider call is deferred.
-    // A send failure is logged, not surfaced - answering "could not send"
-    // only for real accounts would be the same oracle by another route.
-    dispatchAsync(send, `OTP ${channel} delivery`);
+    // DB writes above stay synchronous; only the delivery is deferred. A
+    // failure is not surfaced - answering "could not send" only for real
+    // accounts would be the same oracle by another route - but an email is
+    // handed to the queue rather than dropped, so a refused send is retried
+    // instead of leaving someone waiting on a code that never existed.
+    if (channel === "EMAIL") {
+      dispatchAsync(
+        () => enqueueEmail(emailOptions()),
+        "OTP email delivery"
+      );
+    } else {
+      dispatchAsync(send, `OTP ${channel} delivery`);
+    }
     return { channel, reused: false };
   }
 

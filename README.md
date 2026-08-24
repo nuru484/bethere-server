@@ -325,20 +325,21 @@ CLOUDINARY_API_SECRET=
 # --- Redis (sessions, rate limits, job queue) ---
 REDIS_URL="redis://localhost:6379"
 
-# --- Email (SMTP) ---
-SMTP_HOST="smtp.gmail.com"
-GMAIL_USER=          # the account outgoing mail is sent from
-GMAIL_PASSWORD=      # app password
 ```
+
+Email is **optional**: with no `RESEND_API_KEY` the mailer logs messages
+instead of sending them, so the auth flows stay exercisable without an
+account.
 
 Everything else is **optional** and falls back to a default:
 `NODE_ENV` (`development`), `PORT` (`8080`), `CORS_ACCESS` (extra allowed
 origins, comma-separated), `COOKIE_DOMAIN` (blank = host-only cookies),
 `ADMIN_PHONE`, `ADMIN_SEED_ENABLED` (`false`), `DEMO_LOGIN_ENABLED` (`false`),
 `DEMO_ADMIN_EMAIL`, `DEMO_ATTENDANT_EMAIL`, `LIVENESS_ENABLED` (`true`),
-`FACE_MODELS_PATH` (`./models`), `FACE_MATCH_THRESHOLD` (`0.6`), `SMTP_PORT`
-(`587`), `SMTP_SECURE` (`false`), `SMTP_MAIL` (defaults to `GMAIL_USER`),
-`FROG_API_KEY` / `FROG_USERNAME` / `FROG_SENDER_ID` (all blank = log-only SMS),
+`FACE_MODELS_PATH` (`./models`), `FACE_MATCH_THRESHOLD` (`0.6`),
+`RESEND_API_KEY` (blank = log-only email), `MAIL_FROM` (from-address on
+outgoing mail), `EMAIL_LOGO_URL` (absolute https URL of the logo in email
+mastheads), `FROG_API_KEY` / `FROG_USERNAME` / `FROG_SENDER_ID` (all blank = log-only SMS),
 `EVENT_TIMEZONE` (`Africa/Accra`), `SENTRY_DSN` (blank disables error
 tracking), `WEB_DISABLE_WORKERS` (`false`), and `PROCESS_TYPE` (`web`, read by
 the Docker entrypoint).

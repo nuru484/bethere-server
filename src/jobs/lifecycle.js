@@ -51,6 +51,8 @@ export async function startWorkers() {
     { tokenCleanupQueue },
     { sessionQueue },
     { sessionFinalizerQueue },
+    { createMailWorker },
+    { mailQueue },
     { finalizeDueSessions },
     retentionService,
     bullmq,
@@ -61,6 +63,8 @@ export async function startWorkers() {
     import("./token-cleanup.js"),
     import("./session-queue.js"),
     import("./session-finalizer.js"),
+    import("./mail-worker.js"),
+    import("./mail-queue.js"),
     import("../services/session-finalizer.service.js"),
     import("../services/retention.service.js"),
     import("bullmq"),
@@ -72,8 +76,9 @@ export async function startWorkers() {
   const { createRedisConnection } = redis;
 
   const sessionWorker = createSessionWorker();
+  const mailWorker = createMailWorker();
 
-  logger.info("Session worker started and listening for jobs...");
+  logger.info("Session and mail workers started and listening for jobs...");
 
   // Run the scheduler and finalizer immediately on startup, so a deploy that
   // was down over a boundary catches up without waiting for the next cron.
@@ -122,6 +127,7 @@ export async function startWorkers() {
   running = {
     workers: [
       sessionWorker,
+      mailWorker,
       schedulerWorker,
       tokenCleanupWorker,
       sessionFinalizerWorker,
@@ -133,6 +139,7 @@ export async function startWorkers() {
       tokenCleanupQueue,
       sessionQueue,
       sessionFinalizerQueue,
+      mailQueue,
     ],
   };
   return running;

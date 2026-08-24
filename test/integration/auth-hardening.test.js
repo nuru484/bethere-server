@@ -21,6 +21,15 @@ vi.mock("../../src/utils/send-mail.js", () => ({
     sent.mail.push({ email, text });
   }),
 }));
+vi.mock("../../src/jobs/mail-queue.js", () => ({
+  // Queued mail lands in the same outbox as the direct sends: a test asking
+  // "was this person told?" should not have to care which side of the queue
+  // the message went out on.
+  enqueueEmail: vi.fn(async (options) => {
+    sent.mail.push({ email: options.email, text: options.text });
+  }),
+  mailQueue: { add: vi.fn(), close: vi.fn() },
+}));
 
 const { default: app } = await import("../../app.js");
 const { prisma } = await import("../../src/config/prisma-client.js");

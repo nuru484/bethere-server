@@ -86,7 +86,6 @@ function envRequired(name) {
   return v;
 }
 
-const GMAIL_USER = envRequired("GMAIL_USER");
 
 /** Decodes a 32-byte AES key from a 64-char hex or a base64 string. */
 function decodeKey32(raw, label) {
@@ -232,6 +231,12 @@ const ENV = {
   /** Euclidean match threshold for the enrolled vs captured descriptor. */
   FACE_MATCH_THRESHOLD: envNumber("FACE_MATCH_THRESHOLD", 0.6),
 
+  /**
+   * Masthead logo in every email, fetched by the recipient's client. It only
+   * resolves once it is a public https URL - an inbox cannot fetch localhost.
+   */
+  EMAIL_LOGO_URL: envOptional("EMAIL_LOGO_URL"),
+
   FRONTEND_URL: envRequired("FRONTEND_URL"),
 
   /** Frog (Wigal) SMS credentials - all three unset means log-only SMS. */
@@ -239,8 +244,6 @@ const ENV = {
   FROG_SENDER_ID: envOptional("FROG_SENDER_ID"),
   FROG_USERNAME: envOptional("FROG_USERNAME"),
 
-  GMAIL_PASSWORD: envRequired("GMAIL_PASSWORD"),
-  GMAIL_USER,
 
   /**
    * Google Gemini for the admin analytics AI narrative. Optional: unset leaves
@@ -251,6 +254,9 @@ const ENV = {
   GEMINI_MODEL: envOptional("GEMINI_MODEL") ?? "gemini-2.5-flash",
 
   /** Pino level override; defaults by NODE_ENV (silent in tests). */
+  /** From-address on outgoing mail, e.g. "BeThere <no-reply@bethere.app>". */
+  MAIL_FROM: envOptional("MAIL_FROM") ?? "BeThere <onboarding@resend.dev>",
+
   LOG_LEVEL: envOptional("LOG_LEVEL"),
 
   NODE_ENV: envOptional("NODE_ENV") ?? "development",
@@ -283,16 +289,14 @@ const ENV = {
   SEED_SAMPLE_DATA: envBool("SEED_SAMPLE_DATA"),
 
   REDIS_URL: envRequired("REDIS_URL"),
+
+  /** Resend API key. Unset means the mailer logs instead of sending. */
+  RESEND_API_KEY: envOptional("RESEND_API_KEY"),
   REFRESH_TOKEN_SECRET: envRequired("REFRESH_TOKEN_SECRET"),
 
   /** Error tracking (Sentry). Optional: unset disables reporting. */
   SENTRY_DSN: envOptional("SENTRY_DSN"),
 
-  SMTP_HOST: envRequired("SMTP_HOST"),
-  /** From-address on outgoing mail; defaults to the SMTP account user. */
-  SMTP_MAIL: envOptional("SMTP_MAIL") ?? GMAIL_USER,
-  SMTP_PORT: envNumber("SMTP_PORT", 587),
-  SMTP_SECURE: envBool("SMTP_SECURE"),
 
   /**
    * The web process runs the BullMQ workers in-process by default (single
