@@ -448,6 +448,9 @@ answers. It reads these from the repository's **`production` environment**
 | `RENDER_API_KEY` | optional | Render -> Account Settings -> API Keys. Lets the workflow wait for the build instead of firing and forgetting, so a failed Render build fails the job. |
 | `RENDER_SERVICE_ID` | optional | The `srv-…` id in the service's dashboard URL. Needed together with the API key. |
 | `RENDER_HEALTH_URL` | optional | e.g. `https://api.example.com/health`. The post-deploy readiness gate. |
+| `ADMIN_BOOTSTRAP_ENABLED` | only once | `true` for the single deploy that should create the first admin, then remove it. Unset (the normal state) makes the bootstrap a no-op. |
+| `ADMIN_EMAIL` | with the above | The admin's address. The temporary password is generated and printed in that step's log - read it, change it at first sign-in, then delete the run. |
+| `ADMIN_FIRSTNAME` / `ADMIN_LASTNAME` | with the above | The admin's name. |
 
 ---
 

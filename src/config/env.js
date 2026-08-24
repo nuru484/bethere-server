@@ -185,6 +185,9 @@ const ENV = {
   ADMIN_LASTNAME: envOptional("ADMIN_LASTNAME"),
   ADMIN_PASSWORD: envOptional("ADMIN_PASSWORD"),
   ADMIN_PHONE: envOptional("ADMIN_PHONE"),
+  /** Gate for `npm run bootstrap`: false (default) makes it a no-op, so the
+   * first-admin step only fires on the deploy that is meant to create it. */
+  ADMIN_BOOTSTRAP_ENABLED: envBool("ADMIN_BOOTSTRAP_ENABLED"),
   /** Gate for `npm run seed`: false (default) makes the seed a no-op, so a
    * deploy can never silently plant demo credentials in production. */
   ADMIN_SEED_ENABLED: envBool("ADMIN_SEED_ENABLED"),
