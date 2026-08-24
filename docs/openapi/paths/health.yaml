@@ -84,6 +84,29 @@
             schema: { $ref: '#/components/schemas/ReadinessReport' }
             example: { status: error, db: up, redis: down }
 
+/ready:
+  get:
+    tags: [Health]
+    operationId: readiness
+    summary: Readiness probe (root alias)
+    description: |
+      The same readiness check as `/health/ready`, at the unversioned root
+      path platforms conventionally probe. Both paths answer identically.
+    security: []
+    responses:
+      '200':
+        description: Every dependency is reachable.
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/ReadinessReport' }
+            example: { status: ok, db: up, redis: up }
+      '503':
+        description: At least one dependency is unreachable. The body names which.
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/ReadinessReport' }
+            example: { status: error, db: up, redis: down }
+
 /:
   get:
     tags: [Health]
