@@ -388,22 +388,50 @@ Deployed on **Render** with the following configuration:
 
 > **Note:** Worker process is deployed separately using Render background workers to handle job queues efficiently.
 
+### Render commands
+
+| Field | Value |
+| --- | --- |
+| Build Command | `npm run deploy` (`npm ci && npm run build`) |
+| Start Command | `npm start` (`node server.js`) |
+| Auto-Deploy | **No** - the deploy workflow owns it |
+
+`npm ci` is the install; `npm run build` is `prisma generate`. There is no
+compile step - this service runs JavaScript directly.
+
 ### Database migrations on deploy
 
-Migrations run from the **Docker entrypoint** (`docker-entrypoint.sh`), which
-executes `npx prisma migrate deploy` before the app boots - on the **web
-process only** (`PROCESS_TYPE != worker`), so worker containers never race
-the web container to apply the same migrations. The Prisma CLI is a runtime
-dependency, so the image contains the pinned version (no registry download
-at boot).
+Which path applies depends on how the service is running:
 
-- `RUN_MIGRATIONS=false` skips the automatic migration step (escape hatch
-  for running `migrate deploy` out-of-band, e.g. a manual release step).
-- If a platform bypasses the Docker entrypoint, run
-  `npx prisma migrate deploy` as the pre-deploy/release command instead; the
-  app assumes the schema is current when it boots.
-- CI verifies on every change that `prisma/migrations` exactly reproduces
-  `schema.prisma`, so a schema edit cannot land without its migration.
+- **Source deploy (Render today):** migrations run from
+  `.github/workflows/deploy.yml`, after CI passes and before Render is asked
+  to build. This is the ONLY automatic path here - the platform runs the
+  build command and then `npm start`, so `docker-entrypoint.sh` never
+  executes.
+- **Container deploy:** the entrypoint runs `npx prisma migrate deploy`
+  before the app boots, on the **web process only**
+  (`PROCESS_TYPE != worker`), so worker containers never race the web
+  container. The Prisma CLI is a runtime dependency, so the image carries the
+  pinned version. `RUN_MIGRATIONS=false` opts out.
+
+`migrate deploy` is idempotent, so the two paths do not conflict. CI also
+verifies on every change that `prisma/migrations` exactly reproduces
+`schema.prisma`, so a schema edit cannot land without its migration.
+
+### GitHub secrets the deploy needs
+
+`.github/workflows/deploy.yml` runs after CI passes on `main`, applies
+migrations, triggers Render, waits for the build, and checks the deployed API
+answers. It reads these from the repository's **`production` environment**
+(Settings -> Environments):
+
+| Secret | Required | Where it comes from, and what breaks without it |
+| --- | --- | --- |
+| `RENDER_DEPLOY_HOOK_URL` | yes | Render -> service -> Settings -> Deploy Hook. Without it the whole workflow skips with a notice, and nothing deploys. Holding this URL is enough to trigger a deploy, so treat it as a credential. |
+| `PRODUCTION_DATABASE_URL` | strongly | The Render Postgres **External** connection string (the internal one is unreachable from a GitHub runner). Without it the workflow warns and deploys **without migrating** - and on a source deploy nothing else will. |
+| `RENDER_API_KEY` | optional | Render -> Account Settings -> API Keys. Lets the workflow wait for the build instead of firing and forgetting, so a failed Render build fails the job. |
+| `RENDER_SERVICE_ID` | optional | The `srv-…` id in the service's dashboard URL. Needed together with the API key. |
+| `RENDER_HEALTH_URL` | optional | e.g. `https://api.example.com/health`. The post-deploy readiness gate. |
 
 ---
 
