@@ -3,12 +3,16 @@ name: Deploy API
 # Ships the API only after CI has passed on main, and applies database
 # migrations before the platform is allowed to build the new code.
 #
-# The image also runs `prisma migrate deploy` from docker-entrypoint.sh, which
-# covers a deploy triggered any other way. Applying them here as well is
-# deliberate: `migrate deploy` is idempotent, and doing it BEFORE the build
-# means the schema is in place while the old release is still serving, rather
-# than during the new container's first seconds. Set RUN_MIGRATIONS=false on
-# the service if you would rather this workflow own migrations outright.
+# This is the only automatic migration path for a SOURCE deploy: the platform
+# runs the build command and then `npm start`, so docker-entrypoint.sh - which
+# would otherwise apply migrations at boot - never executes. Without the
+# secrets below, nothing migrates and a release meets a schema it does not
+# expect.
+#
+# The entrypoint still covers container deploys, and `migrate deploy` is
+# idempotent, so the two paths do not conflict. Running it here is the better
+# order regardless: the schema lands while the old release is still serving,
+# rather than during the new process's first seconds.
 #
 # THE PROBLEM THIS SOLVES
 #
