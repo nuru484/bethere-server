@@ -396,10 +396,12 @@ npm run bootstrap   # creates ONE admin from ADMIN_EMAIL / ADMIN_FIRSTNAME /
                     # printed once. Nothing else - no demo data.
 ```
 
-It runs as part of `npm run deploy`, is idempotent (an existing admin holding
-those contacts is left untouched), and **skips with a notice** when the
-`ADMIN_*` variables are absent, so a deployment that does not want an admin
-bootstrapped is not forced to carry them. `npm run seed` is the development
+It runs from the **deploy workflow**, not from the build command - the platform
+only installs, builds and starts. It is idempotent (an existing admin holding
+those contacts is left untouched) and **skips with a notice** when the
+`ADMIN_*` variables are absent, which is the normal state once the admin
+exists. Set `ADMIN_EMAIL`, `ADMIN_FIRSTNAME` and `ADMIN_LASTNAME` as repository
+secrets for the one deploy that should create it. `npm run seed` is the development
 counterpart: demo accounts, sample attendants, events and attendance.
 
 ### Render commands

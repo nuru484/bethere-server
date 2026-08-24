@@ -12,7 +12,7 @@
     "migrate": "node --env-file .env ./node_modules/.bin/prisma migrate dev",
     "migrate:deploy": "node --env-file .env ./node_modules/.bin/prisma migrate deploy",
     "start": "node server.js",
-    "deploy": "npm ci && npm run build && npm run bootstrap",
+    "deploy": "npm ci && npm run build",
     "seed": "npx prisma db seed",
     "bootstrap": "node --env-file .env prisma/bootstrap.js",
     "worker:dev": "node --env-file .env worker.js",
