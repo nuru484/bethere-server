@@ -388,6 +388,20 @@ Deployed on **Render** with the following configuration:
 
 > **Note:** Worker process is deployed separately using Render background workers to handle job queues efficiently.
 
+### First admin on a fresh deployment
+
+```bash
+npm run bootstrap   # creates ONE admin from ADMIN_EMAIL / ADMIN_FIRSTNAME /
+                    # ADMIN_LASTNAME, with a GENERATED temporary password
+                    # printed once. Nothing else - no demo data.
+```
+
+It runs as part of `npm run deploy`, is idempotent (an existing admin holding
+those contacts is left untouched), and **skips with a notice** when the
+`ADMIN_*` variables are absent, so a deployment that does not want an admin
+bootstrapped is not forced to carry them. `npm run seed` is the development
+counterpart: demo accounts, sample attendants, events and attendance.
+
 ### Render commands
 
 | Field | Value |
