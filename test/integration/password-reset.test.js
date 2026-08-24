@@ -44,7 +44,9 @@ const waitForMail = async () => {
 /** The raw token only exists inside the emailed reset link. */
 const lastResetToken = async () => {
   const mail = await waitForMail();
-  const link = mail.at(-1)?.data?.resetLink ?? "";
+  // The link is the email's call to action, and it is repeated in the
+  // plain-text body for clients that refuse HTML.
+  const link = mail.at(-1)?.data?.action?.url ?? "";
   return new URL(link).searchParams.get("token");
 };
 

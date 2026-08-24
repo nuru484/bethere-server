@@ -36,6 +36,21 @@ async function main() {
     return;
   }
 
+  // The admin credentials are optional in the environment - nothing but this
+  // script reads them - so the assertion lives here, where a missing value is
+  // a seed that cannot do its job rather than an API that will not boot.
+  const missing = [
+    "ADMIN_EMAIL",
+    "ADMIN_FIRSTNAME",
+    "ADMIN_LASTNAME",
+    "ADMIN_PASSWORD",
+  ].filter((name) => !ENV[name]);
+  if (missing.length > 0) {
+    throw new Error(
+      `Seeding needs these environment variables: ${missing.join(", ")}`
+    );
+  }
+
   logger.info("Starting database seeding...");
 
   // Dedicated demo principals for the one-click demo login (never the real

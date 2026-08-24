@@ -14,6 +14,7 @@ import {
   BadRequestError,
 } from "../middleware/error-handler.js";
 import { enqueueEmail } from "../jobs/mail-queue.js";
+import { buildPasswordResetEmail } from "../mail/auth-emails.js";
 import {
   findPrincipal,
   findPrincipalByEmail,
@@ -75,15 +76,12 @@ const sendResetEmail = async (principal, rawToken) => {
   const resetLink = `${ENV.FRONTEND_URL}/reset-password?token=${rawToken}`;
 
   await enqueueEmail({
-    email: principal.email,
-    subject: "Password Reset - BeThere",
-    template: "reset-password.ejs",
-    data: {
-      userFirstName: principal.firstName,
-      userLastName: principal.lastName,
+    ...buildPasswordResetEmail({
+      firstName: principal.firstName,
       resetLink,
-      logoUrl: ENV.EMAIL_LOGO_URL,
-    },
+      ttlMinutes: RESET_TOKEN_TTL_MS / 60000,
+    }),
+    email: principal.email,
   });
 };
 

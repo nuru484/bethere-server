@@ -9,6 +9,7 @@ import { prisma } from "../config/prisma-client.js";
 import { BadRequestError, TooManyRequestsError } from "../middleware/error-handler.js";
 import sendMail from "../utils/send-mail.js";
 import { enqueueEmail } from "../jobs/mail-queue.js";
+import { buildOtpCodeEmail } from "../mail/auth-emails.js";
 import { sendSms } from "../utils/send-sms.js";
 import { dispatchAsync } from "../utils/dispatch-async.js";
 import logger from "../utils/logger.js";
@@ -87,9 +88,8 @@ export async function issueOtp({
 
   const label = purpose === "LOGIN" ? "login" : "verification";
   const emailOptions = () => ({
+    ...buildOtpCodeEmail({ label, code, ttlMinutes: OTP_TTL_MS / 60000 }),
     email: principal.email,
-    subject: `Your BeThere ${label} code`,
-    text: `Your BeThere ${label} code is ${code}. It expires in 5 minutes.`,
   });
   const send = () =>
     channel === "SMS"

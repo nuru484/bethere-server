@@ -308,12 +308,6 @@ ACCESS_TOKEN_SECRET="long random string"
 REFRESH_TOKEN_SECRET="long random string, different from the access secret"
 FRONTEND_URL="https://your-frontend.example"
 
-# --- First admin (used by the seed) ---
-ADMIN_EMAIL=
-ADMIN_PASSWORD=
-ADMIN_FIRSTNAME=
-ADMIN_LASTNAME=
-
 # --- Face templates ---
 FACE_TEMPLATE_ENC_KEY=   # 32-byte AES-256-GCM key: openssl rand -hex 32
 
@@ -330,6 +324,10 @@ REDIS_URL="redis://localhost:6379"
 Email is **optional**: with no `RESEND_API_KEY` the mailer logs messages
 instead of sending them, so the auth flows stay exercisable without an
 account.
+
+The admin credentials are read **only** by `npm run seed`, which asserts them
+itself, so a production environment never needs them: `ADMIN_EMAIL`,
+`ADMIN_PASSWORD`, `ADMIN_FIRSTNAME`, `ADMIN_LASTNAME`, `ADMIN_PHONE`.
 
 Everything else is **optional** and falls back to a default:
 `NODE_ENV` (`development`), `PORT` (`8080`), `CORS_ACCESS` (extra allowed

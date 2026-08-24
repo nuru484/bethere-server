@@ -1,13 +1,8 @@
 // src/utils/send-mail.js
-import ejs from "ejs";
-import path from "path";
-import { fileURLToPath } from "url";
 import { Resend } from "resend";
 import ENV from "../config/env.js";
+import { renderTemplate } from "./render-template.js";
 import logger from "./logger.js";
-
-const __filename = fileURLToPath(import.meta.url);
-const __dirname = path.dirname(__filename);
 
 const resend = ENV.RESEND_API_KEY ? new Resend(ENV.RESEND_API_KEY) : null;
 
@@ -34,10 +29,7 @@ const resend = ENV.RESEND_API_KEY ? new Resend(ENV.RESEND_API_KEY) : null;
 const sendMail = async (options) => {
   const { email, subject, template, data, text } = options;
 
-  let html = "";
-  if (template && data) {
-    html = await ejs.renderFile(path.join(__dirname, "../ejs", template), data);
-  }
+  const html = template && data ? await renderTemplate(template, data) : "";
 
   if (!resend) {
     logger.info(

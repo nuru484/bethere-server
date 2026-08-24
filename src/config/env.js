@@ -174,10 +174,16 @@ const FACE_KEYRING = envKeyring();
 const ENV = {
   ACCESS_TOKEN_SECRET: envRequired("ACCESS_TOKEN_SECRET"),
 
-  ADMIN_EMAIL: envRequired("ADMIN_EMAIL"),
-  ADMIN_FIRSTNAME: envRequired("ADMIN_FIRSTNAME"),
-  ADMIN_LASTNAME: envRequired("ADMIN_LASTNAME"),
-  ADMIN_PASSWORD: envRequired("ADMIN_PASSWORD"),
+  /**
+   * ADMIN_*: read ONLY by `npm run seed`, which asserts them itself. Optional
+   * here so the API and the worker boot without them - seeding is a local
+   * chore, and production has no reason to carry the admin credentials in its
+   * environment.
+   */
+  ADMIN_EMAIL: envOptional("ADMIN_EMAIL"),
+  ADMIN_FIRSTNAME: envOptional("ADMIN_FIRSTNAME"),
+  ADMIN_LASTNAME: envOptional("ADMIN_LASTNAME"),
+  ADMIN_PASSWORD: envOptional("ADMIN_PASSWORD"),
   ADMIN_PHONE: envOptional("ADMIN_PHONE"),
   /** Gate for `npm run seed`: false (default) makes the seed a no-op, so a
    * deploy can never silently plant demo credentials in production. */
