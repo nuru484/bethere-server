@@ -81,7 +81,10 @@ if (ENV.NODE_ENV !== "test") {
       logger,
       genReqId: (req) => req.requestId,
       autoLogging: {
-        ignore: (req) => req.url === "/health" || req.url.startsWith("/health/"),
+        ignore: (req) =>
+          req.url === "/health" ||
+          req.url === "/ready" ||
+          req.url.startsWith("/health/"),
       },
     })
   );
@@ -105,8 +108,9 @@ app.get("/health/db", async (req, res) => {
 
 // Readiness: EVERY hard dependency. Redis matters because the credential
 // rate limiters fail closed - with Redis down, login/OTP error while a
-// db-only health check stays green.
-app.get("/health/ready", async (req, res) => {
+// db-only health check stays green. Served at /ready (platform probes) and
+// /health/ready.
+const readiness = async (req, res) => {
   const checks = { db: "up", redis: "up" };
   try {
     await prisma.$queryRaw`SELECT 1`;
@@ -125,7 +129,9 @@ app.get("/health/ready", async (req, res) => {
   res
     .status(ready ? 200 : 503)
     .json({ status: ready ? "ok" : "error", ...checks });
-});
+};
+app.get("/ready", readiness);
+app.get("/health/ready", readiness);
 
 // Public API reference. Mounted before the versioned router so the docs are
 // reachable without a session, and so a future /api/v1 catch-all can never

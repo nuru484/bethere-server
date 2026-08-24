@@ -339,8 +339,28 @@ origins, comma-separated), `COOKIE_DOMAIN` (blank = host-only cookies),
 outgoing mail), `EMAIL_LOGO_URL` (absolute https URL of the logo in email
 mastheads), `FROG_API_KEY` / `FROG_USERNAME` / `FROG_SENDER_ID` (all blank = log-only SMS),
 `EVENT_TIMEZONE` (`Africa/Accra`), `SENTRY_DSN` (blank disables error
-tracking), `WEB_DISABLE_WORKERS` (`false`), and `PROCESS_TYPE` (`web`, read by
-the Docker entrypoint).
+tracking), `SENTRY_ENVIRONMENT` (defaults to `NODE_ENV`),
+`SENTRY_TRACES_SAMPLE_RATE` (`0`), `LOG_LEVEL` (`info` in production, `debug`
+in development, `silent` in tests), `WEB_DISABLE_WORKERS` (`false`), and
+`PROCESS_TYPE` (`web`, read by the Docker entrypoint).
+
+### Error tracking (Sentry)
+
+Sentry is inert until `SENTRY_DSN` is set, so local runs need no account.
+To enable it on a deployment:
+
+1. Create a Node.js project at [sentry.io](https://sentry.io) and copy its DSN.
+2. Set `SENTRY_DSN` on **both** the web and the worker process.
+3. Set `SENTRY_ENVIRONMENT` (`production`, `staging`) so events from each
+   deployment are filtered apart; it defaults to `NODE_ENV`.
+4. Optionally set `SENTRY_TRACES_SAMPLE_RATE` (for example `0.1`) to sample
+   request performance; `0` reports errors only.
+
+What gets reported: 5xx and high-severity errors from the central error
+handler (expected 4xx responses are logged, never sent), failed queue jobs,
+and uncaught exceptions or unhandled rejections, which are flushed to Sentry
+before the process shuts down. Every event carries the `requestId` a client
+sees in its error response.
 
 > `LIVENESS_ENABLED=false` is refused when `NODE_ENV=production`: it would make
 > every check-in pass without looking at a frame.

@@ -133,7 +133,7 @@ export async function startWorkers() {
       sessionFinalizerWorker,
     ],
     // sessionQueue too: it holds its own Redis connection, and leaving it open
-    // makes shutdown wait out the 30s force-exit timer.
+    // makes shutdown wait out the force-exit timer.
     queues: [
       sessionSchedulerQueue,
       tokenCleanupQueue,

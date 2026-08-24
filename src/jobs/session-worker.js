@@ -17,9 +17,12 @@ import { sessionQueue } from "./session-queue.js";
  * without standing up a BullMQ worker and a Redis round-trip.
  */
 export async function processSessionJob(job) {
-  const { eventId } = job.data;
+  const { eventId, requestId } = job.data;
 
-  logger.info(`Processing session creation for event: ${eventId}`);
+  logger.info(
+    { eventId, requestId },
+    `Processing session creation for event: ${eventId}`
+  );
 
   // findUnique on purpose (the soft-delete extension leaves it unscoped), so
   // deletedAt can be INSPECTED rather than silently hiding the row - a chained
@@ -133,7 +136,7 @@ export async function processSessionJob(job) {
       if (delay > 0) {
         await sessionQueue.add(
           "createSession",
-          { eventId: event.id },
+          { eventId: event.id, requestId },
           { delay }
         );
         logger.info(
@@ -166,7 +169,10 @@ export function createSessionWorker() {
   });
 
   worker.on("failed", (job, err) => {
-    logger.error(err.message, `Session job ${job?.id} failed`);
+    logger.error(
+      { err, requestId: job?.data?.requestId },
+      `Session job ${job?.id} failed`
+    );
     // DSN-gated no-op when Sentry is disabled (see lib/sentry.js).
     captureError(err, {
       queue: "sessionQueue",
@@ -178,7 +184,10 @@ export function createSessionWorker() {
   });
 
   worker.on("completed", (job, result) => {
-    logger.info(result, `Session job ${job.id} completed successfully`);
+    logger.info(
+      { ...result, requestId: job.data?.requestId },
+      `Session job ${job.id} completed successfully`
+    );
   });
 
   return worker;

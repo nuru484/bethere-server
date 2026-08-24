@@ -7,7 +7,7 @@ const isTest = ENV.NODE_ENV === "test";
 
 // Defense in depth on top of the error handler's sanitizeErrorData: any
 // object logged directly (a request, a payload, a principal row) has its
-// credential, one-time-code, and biometric fields censored before the log
+// credential, one-time-code, biometric, and phone fields censored before the log
 // stream. Mirrors SENSITIVE_KEY_PARTS in middleware/error-handler.js.
 //
 // `code` is deliberately redacted only where a REQUEST carries one (the OTP /
@@ -16,9 +16,10 @@ const isTest = ENV.NODE_ENV === "test";
 // Node syscall code (ECONNREFUSED) and every Redis/nodemailer code out of
 // production logs - the logger.error(error, msg) call sites are exactly where
 // those codes are the diagnosis.
-const REDACT_PATHS = [
+export const REDACT_PATHS = [
   "req.headers.authorization",
   "req.headers.cookie",
+  'res.headers["set-cookie"]',
   "headers.authorization",
   "headers.cookie",
   "password",
@@ -48,6 +49,8 @@ const REDACT_PATHS = [
   "*.descriptor",
   "identifier",
   "*.identifier",
+  "phone",
+  "*.phone",
 ];
 
 // JSON logs in production (for log aggregators); pretty-printed in dev only;

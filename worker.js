@@ -11,6 +11,10 @@ import { closeRedisClient } from "./src/lib/redis.js";
 import { flushSentry, initSentry } from "./src/lib/sentry.js";
 import { drainDispatches } from "./src/utils/dispatch-async.js";
 import logger from "./src/utils/logger.js";
+import {
+  exitCodeFor,
+  installProcessGuards,
+} from "./src/utils/process-guards.js";
 
 // Init Sentry BEFORE the workers start so a crash during worker startup is
 // still reported.
@@ -50,7 +54,7 @@ const shutdown = async (signal) => {
   const forceExit = setTimeout(() => {
     logger.error("Graceful shutdown timed out; forcing exit");
     process.exit(1);
-  }, 30_000);
+  }, 10_000);
   forceExit.unref();
 
   try {
@@ -65,7 +69,7 @@ const shutdown = async (signal) => {
     await closeRedisClient();
     await flushSentry();
     await prisma.$disconnect();
-    process.exit(0);
+    process.exit(exitCodeFor(signal));
   } catch (error) {
     logger.error(error, "Error during worker shutdown");
     process.exit(1);
@@ -75,11 +79,4 @@ const shutdown = async (signal) => {
 process.on("SIGTERM", () => void shutdown("SIGTERM"));
 process.on("SIGINT", () => void shutdown("SIGINT"));
 
-process.on("unhandledRejection", (reason) => {
-  logger.error(reason, "Unhandled promise rejection in worker");
-});
-
-process.on("uncaughtException", (error) => {
-  logger.fatal(error, "Uncaught exception in worker");
-  void shutdown("uncaughtException");
-});
+installProcessGuards(shutdown);

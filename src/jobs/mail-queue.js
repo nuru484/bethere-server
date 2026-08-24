@@ -13,6 +13,7 @@
 // can reach them while they are still looking at the screen.
 import { Queue } from "bullmq";
 import { createRedisConnection } from "../config/redis-connection.js";
+import { getRequestId } from "../lib/request-context.js";
 import logger from "../utils/logger.js";
 import sendMail from "../utils/send-mail.js";
 
@@ -43,7 +44,10 @@ export const mailQueue = new Queue(MAIL_QUEUE_NAME, {
  */
 export const enqueueEmail = async (options) => {
   try {
-    await mailQueue.add("send-email", options);
+    await mailQueue.add("send-email", {
+      ...options,
+      requestId: getRequestId(),
+    });
   } catch (error) {
     logger.error(
       error,

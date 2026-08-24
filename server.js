@@ -12,6 +12,10 @@ import { closeRedisClient } from "./src/lib/redis.js";
 import { flushSentry } from "./src/lib/sentry.js";
 import { drainDispatches } from "./src/utils/dispatch-async.js";
 import logger from "./src/utils/logger.js";
+import {
+  exitCodeFor,
+  installProcessGuards,
+} from "./src/utils/process-guards.js";
 
 const port = ENV.PORT;
 const server = app.listen(port, () => {
@@ -38,7 +42,7 @@ const shutdown = async (signal) => {
   const forceExit = setTimeout(() => {
     logger.error("Graceful shutdown timed out; forcing exit");
     process.exit(1);
-  }, 30_000);
+  }, 10_000);
   forceExit.unref();
 
   try {
@@ -54,7 +58,7 @@ const shutdown = async (signal) => {
     await flushSentry();
     await prisma.$disconnect();
     logger.info("Shutdown complete");
-    process.exit(0);
+    process.exit(exitCodeFor(signal));
   } catch (error) {
     logger.error(error, "Error during shutdown");
     process.exit(1);
@@ -64,11 +68,4 @@ const shutdown = async (signal) => {
 process.on("SIGTERM", () => void shutdown("SIGTERM"));
 process.on("SIGINT", () => void shutdown("SIGINT"));
 
-process.on("unhandledRejection", (reason) => {
-  logger.error(reason, "Unhandled promise rejection");
-});
-
-process.on("uncaughtException", (error) => {
-  logger.fatal(error, "Uncaught exception");
-  void shutdown("uncaughtException");
-});
+installProcessGuards(shutdown);

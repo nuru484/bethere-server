@@ -11,8 +11,8 @@ export function initSentry() {
   if (!ENV.SENTRY_DSN) return;
   Sentry.init({
     dsn: ENV.SENTRY_DSN,
-    environment: ENV.NODE_ENV,
-    tracesSampleRate: 0,
+    environment: ENV.SENTRY_ENVIRONMENT ?? ENV.NODE_ENV,
+    tracesSampleRate: ENV.SENTRY_TRACES_SAMPLE_RATE,
   });
   enabled = true;
 }

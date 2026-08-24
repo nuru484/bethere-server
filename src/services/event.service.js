@@ -14,6 +14,7 @@ import {
   ValidationError,
 } from "../middleware/error-handler.js";
 import { sessionQueue } from "../jobs/session-queue.js";
+import { getRequestId } from "../lib/request-context.js";
 import {
   deleteImage,
   imageColumnValue,
@@ -67,10 +68,17 @@ async function queueSessionCreation(eventId, eventStartDate, messages) {
   const delay = eventStartDate.getTime() - Date.now();
 
   if (delay > 0) {
-    await sessionQueue.add("createSession", { eventId }, { delay });
+    await sessionQueue.add(
+      "createSession",
+      { eventId, requestId: getRequestId() },
+      { delay }
+    );
     logger.info(messages.scheduled);
   } else {
-    await sessionQueue.add("createSession", { eventId });
+    await sessionQueue.add("createSession", {
+      eventId,
+      requestId: getRequestId(),
+    });
     logger.info(messages.immediate);
   }
 }
@@ -462,7 +470,7 @@ async function reconcileSessionSchedule(
         if (delay > 0) {
           await sessionQueue.add(
             "createSession",
-            { eventId: updatedEvent.id },
+            { eventId: updatedEvent.id, requestId: getRequestId() },
             { delay }
           );
           logger.info(

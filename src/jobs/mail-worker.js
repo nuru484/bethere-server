@@ -12,7 +12,8 @@ export const createMailWorker = () =>
   new Worker(
     MAIL_QUEUE_NAME,
     async (job) => {
-      await sendMail(job.data);
+      const { requestId: _requestId, ...mail } = job.data;
+      await sendMail(mail);
     },
     {
       connection: createRedisConnection(),
@@ -22,7 +23,11 @@ export const createMailWorker = () =>
     }
   ).on("failed", (job, error) => {
     logger.error(
-      { err: error, subject: job?.data?.subject },
+      {
+        err: error,
+        subject: job?.data?.subject,
+        requestId: job?.data?.requestId,
+      },
       "Queued email failed"
     );
   });

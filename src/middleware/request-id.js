@@ -5,6 +5,7 @@
 // req.requestId so the access log, the error log, and the client-visible error
 // id all point at the same request.
 import crypto from "node:crypto";
+import { runWithRequestId } from "../lib/request-context.js";
 
 export function requestId(req, res, next) {
   const inbound = req.headers["x-request-id"];
@@ -14,5 +15,5 @@ export function requestId(req, res, next) {
       : crypto.randomUUID();
   req.requestId = id;
   res.setHeader("X-Request-Id", id);
-  next();
+  runWithRequestId(id, next);
 }

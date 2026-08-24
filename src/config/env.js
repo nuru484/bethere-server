@@ -305,6 +305,10 @@ const ENV = {
 
   /** Error tracking (Sentry). Optional: unset disables reporting. */
   SENTRY_DSN: envOptional("SENTRY_DSN"),
+  /** Environment tag on Sentry events; defaults to NODE_ENV. */
+  SENTRY_ENVIRONMENT: envOptional("SENTRY_ENVIRONMENT"),
+  /** Fraction of requests traced for performance (0 = off). */
+  SENTRY_TRACES_SAMPLE_RATE: envNumber("SENTRY_TRACES_SAMPLE_RATE", 0),
 
 
   /**
