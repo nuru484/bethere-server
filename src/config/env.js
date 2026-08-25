@@ -51,6 +51,24 @@ function envOptional(name) {
   return v?.length ? v : undefined;
 }
 
+const PINO_LEVELS = ["fatal", "error", "warn", "info", "debug", "trace", "silent"];
+
+/**
+ * Reads the optional log level. Anything pino would reject ("verbose",
+ * "INFO") throws at boot with the accepted names listed, instead of pino
+ * throwing on the first log line.
+ */
+function envLogLevel(name) {
+  const v = envOptional(name);
+  if (v === undefined) return undefined;
+  if (!PINO_LEVELS.includes(v)) {
+    throw new Error(
+      `Invalid ${name} "${v}": use one of ${PINO_LEVELS.join(", ")}.`
+    );
+  }
+  return v;
+}
+
 /**
  * Reads the auth-cookie domain. Trimmed, and validated against the same shape
  * Express's `cookie` serializer accepts - a malformed value (stray space,
@@ -262,11 +280,11 @@ const ENV = {
   GEMINI_API_KEY: envOptional("GEMINI_API_KEY"),
   GEMINI_MODEL: envOptional("GEMINI_MODEL") ?? "gemini-2.5-flash",
 
-  /** Pino level override; defaults by NODE_ENV (silent in tests). */
   /** From-address on outgoing mail, e.g. "BeThere <no-reply@bethere.app>". */
   MAIL_FROM: envOptional("MAIL_FROM") ?? "BeThere <onboarding@resend.dev>",
 
-  LOG_LEVEL: envOptional("LOG_LEVEL"),
+  /** Pino level override; defaults by NODE_ENV (silent in tests). */
+  LOG_LEVEL: envLogLevel("LOG_LEVEL"),
 
   NODE_ENV: envOptional("NODE_ENV") ?? "development",
   PORT: envNumber("PORT", 8080),
@@ -309,6 +327,13 @@ const ENV = {
   SENTRY_ENVIRONMENT: envOptional("SENTRY_ENVIRONMENT"),
   /** Fraction of requests traced for performance (0 = off). */
   SENTRY_TRACES_SAMPLE_RATE: envNumber("SENTRY_TRACES_SAMPLE_RATE", 0),
+  /**
+   * Release tag on Sentry events: an explicit SENTRY_RELEASE, else the commit
+   * Render is running (RENDER_GIT_COMMIT is set by the platform). Unset means
+   * events arrive unversioned; it never blocks boot.
+   */
+  SENTRY_RELEASE:
+    envOptional("SENTRY_RELEASE") ?? envOptional("RENDER_GIT_COMMIT"),
 
 
   /**

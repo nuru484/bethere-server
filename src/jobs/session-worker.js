@@ -8,8 +8,9 @@ import {
   nextOccurrenceStart,
   planOccurrenceSessions,
 } from "../services/session-planning.js";
+import { runWithRequestId } from "../lib/request-context.js";
 import { captureError } from "../lib/sentry.js";
-import logger from "../utils/logger.js";
+import logger, { requestLogger } from "../utils/logger.js";
 import { sessionQueue } from "./session-queue.js";
 
 /**
@@ -18,11 +19,9 @@ import { sessionQueue } from "./session-queue.js";
  */
 export async function processSessionJob(job) {
   const { eventId, requestId } = job.data;
+  const log = requestLogger();
 
-  logger.info(
-    { eventId, requestId },
-    `Processing session creation for event: ${eventId}`
-  );
+  log.info({ eventId }, `Processing session creation for event: ${eventId}`);
 
   // findUnique on purpose (the soft-delete extension leaves it unscoped), so
   // deletedAt can be INSPECTED rather than silently hiding the row - a chained
@@ -49,7 +48,7 @@ export async function processSessionJob(job) {
   // re-chain - returning here ends the chain for good.
   if (event.deletedAt || event.archived) {
     const reason = event.deletedAt ? "Event deleted" : "Event archived";
-    logger.info(`${reason}; skipping session creation for event ${eventId}`);
+    log.info(`${reason}; skipping session creation for event ${eventId}`);
     return { status: "skipped", reason };
   }
 
@@ -79,7 +78,7 @@ export async function processSessionJob(job) {
   });
 
   if (existingSession) {
-    logger.info(
+    log.info(
       `Session already exists for event ${eventId} on ${sessionStartDate}`
     );
 
@@ -88,7 +87,7 @@ export async function processSessionJob(job) {
 
   // Check if we should still create sessions (if event has endDate)
   if (event.endDate && sessionStartDate > new Date(event.endDate)) {
-    logger.info(
+    log.info(
       `Event ${eventId} has ended. No more sessions will be created.`
     );
 
@@ -112,7 +111,7 @@ export async function processSessionJob(job) {
   });
 
   const lastPlanned = plannedSessions[plannedSessions.length - 1];
-  logger.info(
+  log.info(
     `Created ${count} session(s) for event ${eventId}: ` +
       `${format(sessionStartDate, "yyyy-MM-dd")} -> ` +
       `${format(lastPlanned.startDate, "yyyy-MM-dd")} ` +
@@ -139,7 +138,7 @@ export async function processSessionJob(job) {
           { eventId: event.id, requestId },
           { delay }
         );
-        logger.info(
+        log.info(
           `Scheduled next session for ${format(
             nextSessionDate,
             "yyyy-MM-dd"
@@ -164,9 +163,13 @@ export async function processSessionJob(job) {
  * unit test, a script) spins one up. Only lifecycle.js should call this.
  */
 export function createSessionWorker() {
-  const worker = new Worker("sessionQueue", processSessionJob, {
-    connection: createRedisConnection(),
-  });
+  // Each job runs inside the request context it was queued from, so every
+  // log line and error report in the job carries that request id.
+  const worker = new Worker(
+    "sessionQueue",
+    (job) => runWithRequestId(job.data?.requestId, () => processSessionJob(job)),
+    { connection: createRedisConnection() }
+  );
 
   worker.on("failed", (job, err) => {
     logger.error(
@@ -175,6 +178,7 @@ export function createSessionWorker() {
     );
     // DSN-gated no-op when Sentry is disabled (see lib/sentry.js).
     captureError(err, {
+      requestId: job?.data?.requestId,
       queue: "sessionQueue",
       jobId: job?.id,
       jobName: job?.name,

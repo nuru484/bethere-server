@@ -4,15 +4,15 @@
 // without, it logs the message so dev and test runs need no provider. OTP
 // codes must never be logged in production - only the destination is.
 import ENV from "../config/env.js";
-import logger from "../utils/logger.js";
+import { requestLogger } from "../utils/logger.js";
 
 export async function sendSms(phone, message) {
   if (!ENV.FROG_API_KEY || !ENV.FROG_USERNAME || !ENV.FROG_SENDER_ID) {
     if (ENV.NODE_ENV === "production") {
-      logger.warn({ phone }, "SMS requested but no provider is configured");
+      requestLogger().warn({ phone }, "SMS requested but no provider is configured");
       return;
     }
-    logger.info({ phone, message }, "SMS (log-only, no provider configured)");
+    requestLogger().info({ phone, message }, "SMS (log-only, no provider configured)");
     return;
   }
 

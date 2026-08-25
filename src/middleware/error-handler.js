@@ -2,7 +2,10 @@
 import logger from "../utils/logger.js";
 import { captureError } from "../lib/sentry.js";
 import ENV from "../config/env.js";
+import { sanitizeErrorData } from "../utils/sensitive-data.js";
 import { handlePrismaError, isPrismaError } from "./prisma-error-handler.js";
+
+export { sanitizeErrorData };
 
 /**
  * Error severity levels for better logging and monitoring
@@ -48,63 +51,6 @@ const generateErrorId = () => {
   return `err_${Date.now().toString(36)}_${Math.random()
     .toString(36)
     .substring(2, 9)}`;
-};
-
-/**
- * Sanitize error data for safe logging and response
- */
-/**
- * Substrings that mark a field as sensitive. Beyond the obvious credentials
- * these cover:
- *  - "facescan"/"descriptor": the 128-float biometric template. Logging it
- *    would defeat the AES-256-GCM at-rest encryption it is stored under.
- *  - "code"/"otp": one-time login and 2FA codes, and the rotating venue code
- *    ("venueCode" also matches) - all are live credentials while they last.
- *  - "identifier": the email/phone an OTP was requested for (PII, and pairing
- *    it with a logged code is exactly the combination to keep apart).
- */
-const SENSITIVE_KEY_PARTS = [
-  "password",
-  "token",
-  "secret",
-  "auth",
-  "key",
-  "credit",
-  "ssn",
-  "code",
-  "otp",
-  "facescan",
-  "descriptor",
-  "identifier",
-];
-
-const isSensitiveKey = (key) =>
-  SENSITIVE_KEY_PARTS.some((part) => key.toLowerCase().includes(part));
-
-export const sanitizeErrorData = (data) => {
-  if (!data) return data;
-
-  if (Array.isArray(data)) {
-    return data.map((entry) => sanitizeErrorData(entry));
-  }
-
-  if (typeof data === "object") {
-    const sanitized = {};
-
-    Object.entries(data).forEach(([key, value]) => {
-      if (isSensitiveKey(key)) {
-        sanitized[key] = "[REDACTED]";
-      } else if (typeof value === "object" && value !== null) {
-        sanitized[key] = sanitizeErrorData(value);
-      } else {
-        sanitized[key] = value;
-      }
-    });
-
-    return sanitized;
-  }
-
-  return data;
 };
 
 /**

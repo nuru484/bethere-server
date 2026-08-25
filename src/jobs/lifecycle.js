@@ -31,8 +31,10 @@ async function ensureRepeatableJob(queue, name, pattern) {
 /** Job-failure reporting shared by every worker: log + Sentry (DSN-gated). */
 function reportJobFailure(queueName) {
   return (job, err) => {
-    logger.error(err, `${queueName} job ${job?.id} failed`);
+    const requestId = job?.data?.requestId;
+    logger.error({ err, requestId }, `${queueName} job ${job?.id} failed`);
     captureError(err, {
+      requestId,
       queue: queueName,
       jobId: job?.id,
       jobName: job?.name,

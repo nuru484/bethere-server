@@ -1,6 +1,7 @@
 // src/utils/logger.js
 import pino from "pino";
 import ENV from "../config/env.js";
+import { getRequestId } from "../lib/request-context.js";
 
 const isProduction = ENV.NODE_ENV === "production";
 const isTest = ENV.NODE_ENV === "test";
@@ -8,7 +9,7 @@ const isTest = ENV.NODE_ENV === "test";
 // Defense in depth on top of the error handler's sanitizeErrorData: any
 // object logged directly (a request, a payload, a principal row) has its
 // credential, one-time-code, biometric, and phone fields censored before the log
-// stream. Mirrors SENSITIVE_KEY_PARTS in middleware/error-handler.js.
+// stream. Mirrors SENSITIVE_KEY_PARTS in utils/sensitive-data.js.
 //
 // `code` is deliberately redacted only where a REQUEST carries one (the OTP /
 // 2FA / venue code in a body or query string). A blanket "*.code" also matches
@@ -73,5 +74,15 @@ const logger = pino({
         },
       }),
 });
+
+/**
+ * The logger for the current unit of work: a child carrying the request id
+ * when one is in scope (an HTTP request, or a job that was queued by one),
+ * the base logger otherwise. Resolve it at call time, not at module load.
+ */
+export const requestLogger = () => {
+  const requestId = getRequestId();
+  return requestId ? logger.child({ requestId }) : logger;
+};
 
 export default logger;

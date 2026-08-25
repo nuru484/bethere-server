@@ -199,7 +199,7 @@ Automates session creation and finalization, the daily retention sweep, and queu
 
 ### Prerequisites
 
-* **Node.js** ≥ 20.6 (the `dev`, `migrate`, `seed:dev`, `worker:dev`, and `studio` scripts use `node --env-file`, which landed in 20.6). Node **22** is what the Dockerfile builds and runs on and is the recommended version.
+* **Node.js 22**, the exact version pinned in `.nvmrc` (`nvm use` picks it up; CI and the deploy workflow install the same one, and the Dockerfile builds on `node:22`). The `dev`, `migrate`, `worker:dev`, and `studio` scripts use `node --env-file`, so anything below 20.6 will not run them.
 * **PostgreSQL** ≥ 14
 * **Redis** (for BullMQ queue management)
 
@@ -348,9 +348,23 @@ outgoing mail), `EMAIL_LOGO_URL` (absolute https URL of the logo in email
 mastheads), `FROG_API_KEY` / `FROG_USERNAME` / `FROG_SENDER_ID` (all blank = log-only SMS),
 `EVENT_TIMEZONE` (`Africa/Accra`), `SENTRY_DSN` (blank disables error
 tracking), `SENTRY_ENVIRONMENT` (defaults to `NODE_ENV`),
-`SENTRY_TRACES_SAMPLE_RATE` (`0`), `LOG_LEVEL` (`info` in production, `debug`
-in development, `silent` in tests), `WEB_DISABLE_WORKERS` (`false`), and
-`PROCESS_TYPE` (`web`, read by the Docker entrypoint).
+`SENTRY_TRACES_SAMPLE_RATE` (`0`), `SENTRY_RELEASE` (defaults to
+`RENDER_GIT_COMMIT`, which Render sets itself), `LOG_LEVEL` (one of pino's
+`fatal`, `error`, `warn`, `info`, `debug`, `trace`, `silent`; any other value
+refuses to boot; defaults to `info` in production, `debug` in development,
+`silent` in tests), `WEB_DISABLE_WORKERS` (`false`), and `PROCESS_TYPE`
+(`web`, read by the Docker entrypoint).
+
+### Logging and request correlation
+
+Every request gets an id (an inbound `X-Request-Id` is reused, otherwise one
+is minted), echoed on the response header and in any error body. The id is
+held in an `AsyncLocalStorage` store (`src/lib/request-context.js`) for the
+rest of the request, so `requestLogger()` in `src/utils/logger.js` returns a
+child logger bound to it from anywhere in the call chain, and work queued
+during the request (session creation, deferred email) carries it in the job
+payload. Workers run each job inside that same context, so job logs, job
+failure reports and Sentry events all trace back to the originating request.
 
 ### Error tracking (Sentry)
 
@@ -363,12 +377,18 @@ To enable it on a deployment:
    deployment are filtered apart; it defaults to `NODE_ENV`.
 4. Optionally set `SENTRY_TRACES_SAMPLE_RATE` (for example `0.1`) to sample
    request performance; `0` reports errors only.
+5. Events are tagged with the release: `SENTRY_RELEASE` if set, else the
+   `RENDER_GIT_COMMIT` Render provides, so nothing is needed on Render.
 
 What gets reported: 5xx and high-severity errors from the central error
 handler (expected 4xx responses are logged, never sent), failed queue jobs,
 and uncaught exceptions or unhandled rejections, which are flushed to Sentry
 before the process shuts down. Every event carries the `requestId` a client
-sees in its error response.
+sees in its error response, and an authenticated request is attributed to the
+principal's opaque id only (no email, phone or name). `sendDefaultPii` is off,
+and a `beforeSend` scrubber masks the same sensitive keys the error handler
+redacts (credentials, one-time codes, biometrics, cookies) in event extras,
+contexts, request data and exception messages before anything is sent.
 
 > `LIVENESS_ENABLED=false` is refused when `NODE_ENV=production`: it would make
 > every check-in pass without looking at a frame.
@@ -461,6 +481,19 @@ Which path applies depends on how the service is running:
 `migrate deploy` is idempotent, so the two paths do not conflict. CI also
 verifies on every change that `prisma/migrations` exactly reproduces
 `schema.prisma`, so a schema edit cannot land without its migration.
+
+### Continuous integration
+
+`.github/workflows/ci.yml` runs on every push to `main` and every pull
+request, on the Node version in `.nvmrc`, against a real Postgres 16 and
+Redis 7: `npm run lint`, `npm run docs:check` (the OpenAPI reference must
+match the mounted routes), the production dependency audit gate
+(`scripts/audit-gate.mjs`, fails on high or critical advisories), the
+migration drift gate (`prisma migrate diff` from `prisma/migrations` to
+`schema.prisma`), and `npm run test:coverage`, which fails below the
+coverage floors in `vitest.config.js`. A separate job builds the Dockerfile
+so the image cannot rot unnoticed. Superseded runs on the same ref are
+cancelled.
 
 ### GitHub secrets the deploy needs
 

@@ -10,6 +10,7 @@
 // reach a cookie-authenticated route. req.handoff carries the exact capture the
 // token is scoped to (scope + event + mode); controllers must trust THAT, not
 // anything the client sends, for the event/mode.
+import { setSentryUser } from "../lib/sentry.js";
 import { UnauthorizedError } from "./error-handler.js";
 import { verifyHandoffToken } from "../services/pairing.service.js";
 
@@ -34,6 +35,7 @@ export const authenticateHandoff = async (req, _res, next) => {
     // Minimal USER principal so assertAttendant + the services (which read
     // req.user.id as the actor) behave exactly as for a cookie session.
     req.user = { id: context.userId, kind: "USER", role: "USER" };
+    setSentryUser(context.userId);
     req.handoff = {
       pairingId: context.pairingId,
       scope: context.scope,

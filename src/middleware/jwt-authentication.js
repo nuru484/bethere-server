@@ -4,6 +4,7 @@
 // (never readable by page JavaScript), and every request re-checks the
 // principal's session epoch so revocation applies mid-token-lifetime.
 import ENV from "../config/env.js";
+import { setSentryUser } from "../lib/sentry.js";
 import { UnauthorizedError } from "./error-handler.js";
 import {
   getCachedTokenVersion,
@@ -88,6 +89,7 @@ export const authenticateJWT = async (req, res, next) => {
     }
 
     req.user = decodedUser;
+    setSentryUser(decodedUser.id);
 
     next();
   } catch (error) {

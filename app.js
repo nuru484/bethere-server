@@ -19,7 +19,7 @@ import {
   NotFoundError,
 } from "./src/middleware/error-handler.js";
 import { prisma } from "./src/config/prisma-client.js";
-import { initSentry } from "./src/lib/sentry.js";
+import { initSentry, sentryRequestScope } from "./src/lib/sentry.js";
 import { mountApiDocs } from "./src/docs/mount.js";
 
 initSentry();
@@ -72,6 +72,7 @@ app.use(cookieParser());
 // into the IP the rate limiter keys on and the audit trail records.
 app.set("trust proxy", ENV.TRUST_PROXY);
 app.use(requestId);
+app.use(sentryRequestScope);
 if (ENV.NODE_ENV !== "test") {
   // Access logs through the same pino logger as everything else, so
   // production emits ONE format (JSON) and access lines carry the requestId

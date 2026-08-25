@@ -2,7 +2,7 @@
 import { Resend } from "resend";
 import ENV from "../config/env.js";
 import { renderTemplate } from "./render-template.js";
-import logger from "./logger.js";
+import { requestLogger } from "./logger.js";
 
 const resend = ENV.RESEND_API_KEY ? new Resend(ENV.RESEND_API_KEY) : null;
 
@@ -32,7 +32,7 @@ const sendMail = async (options) => {
   const html = template && data ? await renderTemplate(template, data) : "";
 
   if (!resend) {
-    logger.info(
+    requestLogger().info(
       { to: email, subject, text },
       "RESEND_API_KEY not set - email logged instead of sent"
     );

@@ -4,6 +4,7 @@
 // to retry, and what puts a message that never lands on the failed set.
 import { Worker } from "bullmq";
 import { createRedisConnection } from "../config/redis-connection.js";
+import { runWithRequestId } from "../lib/request-context.js";
 import { MAIL_QUEUE_NAME } from "./mail-queue.js";
 import logger from "../utils/logger.js";
 import sendMail from "../utils/send-mail.js";
@@ -11,9 +12,11 @@ import sendMail from "../utils/send-mail.js";
 export const createMailWorker = () =>
   new Worker(
     MAIL_QUEUE_NAME,
+    // The send runs inside the originating request's context, so the
+    // mailer's own log lines carry that request id.
     async (job) => {
-      const { requestId: _requestId, ...mail } = job.data;
-      await sendMail(mail);
+      const { requestId, ...mail } = job.data;
+      await runWithRequestId(requestId, () => sendMail(mail));
     },
     {
       connection: createRedisConnection(),
