@@ -42,7 +42,7 @@ jobs:
       - uses: actions/checkout@v4
       - uses: actions/setup-node@v4
         with:
-          node-version: 22
+          node-version-file: .nvmrc
           cache: npm
       - run: npm ci
       - run: npm run lint
@@ -68,7 +68,8 @@ jobs:
         run: npx prisma migrate diff --from-migrations prisma/migrations --to-schema prisma/schema.prisma --exit-code
         env:
           SHADOW_DATABASE_URL: postgresql://postgres:postgres@localhost:5432/bethere_drift_check
-      - run: npm test
+      # Coverage floors live in vitest.config.js; a drop below them fails here.
+      - run: npm run test:coverage
 
   # The image must build on every change: the entrypoint runs the Prisma CLI
   # and the runtime stage's dependency set can silently rot otherwise.

@@ -61,8 +61,15 @@ export default defineConfig({
     testTimeout: 30_000,
     coverage: {
       provider: "v8",
-      include: ["src/**", "app.js", "server.js", "worker.js"],
+      include: ["src/**/*.js", "app.js", "server.js", "worker.js"],
       reporter: ["text", "html"],
+      // Floors hold the current level so a change cannot quietly shed tests.
+      thresholds: {
+        lines: 75,
+        statements: 75,
+        functions: 80,
+        branches: 65,
+      },
     },
     env: {
       NODE_ENV: "test",
