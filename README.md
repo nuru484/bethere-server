@@ -13,7 +13,7 @@ This repository is the **API and background job engine**. It handles authenticat
 ## How It Works
 
 **1. Enrollment (consented, encrypted).**
-A user enrolls their face once. The 128-dimension descriptor is produced in the browser with **face-api.js**, but the server stores it **AES-256-GCM encrypted at rest** (`faceScanEnc`) and decrypts it only in memory at match time; the raw descriptor never leaves the server. Enrollment requires explicit **biometric consent** (GDPR Art. 9 / BIPA), and deletion destroys the template.
+A user enrolls their face once through the same guided liveness capture used at check-in: the browser uploads raw frames, and the **server** derives the 128-dimension descriptor from them with **@vladmandic/face-api** (no descriptor is ever computed in, or accepted from, the browser). The template is stored **AES-256-GCM encrypted at rest** (`faceScanEnc`, bound to its owner through the cipher's additional authenticated data) and decrypted only in memory at match time; the raw descriptor never leaves the server. Enrollment requires explicit **biometric consent** (GDPR Art. 9 / BIPA), and deletion destroys the template.
 
 **2. Presence: the rotating venue code.**
 Each event has a server-side secret. A screen at the venue shows a QR that rotates every **30 seconds**; the codes are stateless keyed hashes of the secret and the current time window, so nothing polls or writes the database to rotate them (the display fetches a batch and cycles locally). Scanning the current code is the presence gate. A screenshotted code is stale within seconds.
@@ -75,9 +75,9 @@ that no longer exists.
 ### User Capabilities
 
 * Register and authenticate (passwordless OTP login or password + optional 2FA).
-* Enroll a face once (consented; stored encrypted on the server).
-* Check in and out by scanning the venue's rotating code, then a live face-liveness check.
-* View personal attendance history and event details.
+* Enroll a face once (consented; derived and stored encrypted on the server), on the current device or from a phone paired by QR code.
+* Check in and out by scanning the venue's rotating code, then a live face-liveness check; either step can be handed to a paired phone.
+* View personal attendance history, event details, and a personal dashboard.
 
 ### Admin Capabilities
 
@@ -85,20 +85,21 @@ that no longer exists.
 * Open the **venue-code display** for an event (the screen shown at the location).
 * Define event recurrence, duration, and allowed check-in times.
 * Manage user records and reset a user's face template when required.
-* Review anomaly flags and check-in evidence; view attendance analytics and reports.
+* Review anomaly flags and check-in evidence; view attendance analytics and reports, export them to Excel, and generate an AI-written narrative of the numbers (Gemini, optional).
+* Every admin and biometric action lands in an append-only audit log.
 
 ### Automated System Intelligence
 
-* **BullMQ + Redis** power recurring event **session generation**.
+* **BullMQ + Redis** power recurring event **session generation**, a **session finalizer** that marks absentees and auto-checks-out open check-ins once a session's grace period has passed, and a **mail queue** with retries for email nobody is waiting on screen for.
 * Rotating **venue codes** are stateless keyed hashes (no per-rotation DB load).
 * **date-fns** manages all date and time calculations (windows in the venue timezone).
-* A scheduled **retention sweep** purges expired auth material, challenges, evidence, and dormant biometric templates.
+* A scheduled **retention sweep** purges expired auth material, challenges, pairing sessions, evidence, and dormant biometric templates.
 * Robust **error handling**, **role-based access control**, and **input validation** via *express-validator*.
 
 ### Authentication & Security
 
 * **Cookie-only JWT** access + refresh tokens with **rotation and replay-as-theft detection**, plus a per-request session-epoch check for instant revocation.
-* Passwordless **OTP login**, optional **2FA**, and a hashed-token **password reset** flow (`nodemailer` + EJS).
+* Passwordless **OTP login**, optional **2FA**, and a hashed-token **password reset** flow (Resend + EJS templates).
 * **Server-side face verification** with **randomized-action liveness**; biometric templates **AES-256-GCM encrypted at rest**, decrypted only in memory.
 * **Consent + retention** for biometric data; flagged-attempt **evidence**, **anomaly flags**, and an append-only **audit log**.
 * Redis-backed **rate limiting**, `helmet`, bcrypt password hashing, **Cloudinary** image storage (parsed with `multer`), and CORS locked to trusted origins.
@@ -122,9 +123,9 @@ that no longer exists.
 | **Date Handling**      | date-fns                                        |
 | **File Uploads**       | multer (multipart parsing)                    |
 | **File Storage**       | Cloudinary                                      |
-| **Email**              | nodemailer + EJS templates                    |
+| **Email**              | Resend + EJS templates (queued via BullMQ)    |
 | **Validation**         | express-validator                              |
-| **Logging**            | pino + pino-pretty, morgan (HTTP requests)    |
+| **Logging**            | pino + pino-http (request-correlated), Sentry |
 | **CORS**               | cors (trusted origins only)                   |
 | **Deployment**         | Render (API + separate background worker)     |
 
@@ -133,7 +134,7 @@ that no longer exists.
 ## Architecture Overview
 
 ```
-Frontend (face-api.js)
+Frontend (React; MediaPipe FaceLandmarker only gates when frames are captured)
    ↓
 API Gateway (Express.js)
    ↓
@@ -146,7 +147,7 @@ Session Scheduler → Session Worker (background)
 
 **Key Data Flow:**
 
-1. Enrollment: the client computes a face descriptor; the server stores it encrypted.
+1. Enrollment: the client uploads raw frames from a guided liveness capture; the server verifies them, derives the face descriptor, and stores it encrypted.
 2. On sign-in/out, the client sends the scanned venue code, then uploads raw face frames.
 3. The server validates both, from its own data and the pixels:
 
@@ -159,13 +160,17 @@ Session Scheduler → Session Worker (background)
 
 ## Database Design
 
-**Core Entities**
+**Core Entities** (14 Prisma models)
 
-* **User**: stores user details, roles, and face scan embeddings.
-* **Event**: base entity defining event metadata, recurrence, and location.
-* **Session**: generated automatically for recurring or future events.
-* **Attendance**: links users to sessions (with timestamps and status).
+* **User**: an attendant; profile, consent, the encrypted face template (`faceScanEnc`), and the session epoch (`tokenVersion`).
+* **Admin**: staff, a separate table from users with its own lifecycle and no biometrics.
+* **Event**: base entity defining event metadata, recurrence, the venue-code secret, and location.
+* **Session**: one occurrence of an event, generated automatically for recurring or future events and finalized once its window and grace have passed.
+* **Attendance**: links users to sessions (PRESENT / LATE / ABSENT, with timestamps and an auto-check-out flag).
 * **Location**: stores the venue's name, city, and country for each event (no coordinates: presence is proven by the rotating venue code, not GPS).
+* **LivenessChallenge** and **PairingSession**: the single-use challenge with its randomized action sequence, and the QR hand-off that lets a phone enroll or check in on behalf of the signed-in device.
+* **AnomalyFlag**, **AttendanceEvidence**, **AuditLog**: the review trail for failed or suspicious attempts, and the append-only record of every security-relevant action.
+* **RefreshToken**, **OtpCode**, **PasswordReset**: hashed, single-use auth material.
 
 All schema relations and constraints are defined using **Prisma**.
 
@@ -175,15 +180,17 @@ All schema relations and constraints are defined using **Prisma**.
 
 ### Purpose
 
-Automates the creation of event sessions using **BullMQ** and **Redis**.
+Automates session creation and finalization, the daily retention sweep, and queued email using **BullMQ** and **Redis**.
 
 ### Components
 
 * `src/jobs/session-queue.js` → defines the job queue.
 * `src/jobs/session-scheduler.js` → finds upcoming events and schedules session creation jobs.
 * `src/jobs/session-worker.js` → executes session creation logic, ensuring no duplicates and respecting recurrence intervals.
+* `src/jobs/session-finalizer.js` → queue for the session-finalization sweep (absence marking and auto check-out, every few minutes; `SESSION_FINALIZER.CRON_PATTERN`).
 * `src/jobs/token-cleanup.js` → queue for the daily retention sweep.
-* `src/jobs/lifecycle.js` → starts/stops every worker and registers the daily repeatable jobs (session generation at midnight, retention sweep at 03:00). Shared by both entrypoints.
+* `src/jobs/mail-queue.js` / `mail-worker.js` → email that must not fail the action that triggered it (reset links, deferred codes) is queued with retries; mail a person is waiting for on screen stays awaited at the call site.
+* `src/jobs/lifecycle.js` → starts/stops every worker and registers the repeatable jobs (session generation at midnight, retention sweep at 03:00, session finalization on its own cron), running the scheduler and finalizer once on boot so a deploy that was down over a boundary catches up. Shared by both entrypoints.
 * `worker.js` → the dedicated worker process entrypoint: calls `startWorkers()` and manages graceful shutdown. The web process (`server.js`) runs the same workers in-process unless `WEB_DISABLE_WORKERS=true`.
 
 ---
@@ -230,11 +237,12 @@ models/
 
 If you ever need to restore them, take them from the `model/` directory of the
 [@vladmandic/face-api](https://github.com/vladmandic/face-api) repository (the same
-weights face-api.js publishes). Note that the client's `public/models` is **not** a
-complete source: the browser only enrolls descriptors, so it ships just
-`tiny_face_detector`, `face_landmark_68`, and `face_recognition`. The
-`face_expression` net is server-only (the "smile" liveness action needs it), and a
-missing set makes model loading, and therefore every check-in, fail.
+weights face-api.js publishes). The client is not a source for them: it ships
+only the MediaPipe FaceLandmarker bundle under `public/models/mediapipe`, which
+guides the capture and never produces a descriptor. Every face-api net,
+including `face_expression` (the "smile" liveness action needs it), is
+server-only, and a missing set makes model loading, and therefore every
+enrollment and check-in, fail.
 
 **2. The biometric encryption key.** Generate it and put it in `.env`:
 
